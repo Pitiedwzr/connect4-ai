@@ -95,7 +95,7 @@ while not game_over:
             print(f"PLAYER {piece} WINS!")
             game_over = True
 
-        elif len(board[board == 0]) == 0:
+        elif len(board[board == 0]) == 0: # boolean indexing, return all elements that =0 in the array
             print("DRAW!")
             game_over = True
 
