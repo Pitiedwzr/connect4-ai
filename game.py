@@ -3,10 +3,14 @@ import numpy as np
 
 ROW_COUNT = 6
 COL_COUNT = 7
+PLAYER_PIECE = 1
+AI_PIECE = 2
 
 def create_board():
-    board = np.zeros((ROW_COUNT, COL_COUNT), dtype=int)
-    return board
+    return np.zeros((ROW_COUNT, COL_COUNT), dtype=int)
+
+def print_board(board):
+    print(np.flip(board, 0))
 
 def drop_piece(board, row, col, piece):
     board[row][col] = piece
@@ -50,28 +54,53 @@ def winning_move(board, piece):
 
     return False
 
+# Main logic
 board = create_board()
 game_over = False
 turn = 0
 
-while not game_over:
-    if turn == 0:
-        selection = int(input('Player 1, Select an column(0-6): '))
-        if is_valid_location(board, selection):
-            row = get_next_open_row(board, selection)
-            drop_piece(board, row, selection, 1)
-            if winning_move(board, 1):
-                print("PLAYER 1 WINS!!")
-                game_over = True
-    else:
-        selection = int(input('Player 2, Select an column(0-6): '))
-        if is_valid_location(board, selection):
-            row = get_next_open_row(board, selection)
-            drop_piece(board, row, selection, 2)
-            if winning_move(board, 2):
-                print("PLAYER 2 WINS!!")
-                game_over = True
+print_board(board)
 
-    print(np.flip(board, 0))
-    turn += 1
-    turn %= 2
+while not game_over:
+    piece = 0
+    if turn == 0:
+        piece = PLAYER_PIECE
+        try:
+            selection = int(input(f'Player {piece}, Select an column(0-{COL_COUNT-1}): '))
+            if selection < 0 or selection >= COL_COUNT:
+                print(f'Invalid column, please enter a number between 0 and {COL_COUNT-1}.')
+                continue
+
+        except ValueError:
+            print('Invalid input, please enter a number between 0 and 6.')
+            continue
+
+    else:
+        piece = AI_PIECE # Leave for future implement
+        try:
+            selection = int(input(f'Player {piece}, Select an column(0-{COL_COUNT-1}): '))
+            if selection < 0 or selection >= COL_COUNT:
+                print(f'Invalid column, please enter a number between 0 and {COL_COUNT-1}.')
+                continue
+
+        except ValueError:
+            print('Invalid input, please enter a number between 0 and 6.')
+            continue
+
+    if is_valid_location(board, selection):
+        row = get_next_open_row(board, selection)
+        drop_piece(board, row, selection, piece)
+        if winning_move(board, piece):
+            print_board(board)
+            print(f"PLAYER {piece} WINS!")
+            game_over = True
+
+        elif len(board[board == 0]) == 0:
+            print("DRAW!")
+            game_over = True
+
+        print_board(board)
+        turn = (turn + 1) % 2
+
+    else:
+        print("Column is full! Please choose another one.")
