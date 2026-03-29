@@ -1,5 +1,6 @@
 import numpy as np
-
+import math
+import random
 
 ROW_COUNT = 6
 COL_COUNT = 7
@@ -145,7 +146,7 @@ def minimax(board, depth, alpha, beta, maximizing_player):
                 break
         return best_c, value
 
-    else: # PLayer
+    else: # Player
         value = math.inf
         best_c = random.choice(valid_locations)
         for c in valid_locations:
