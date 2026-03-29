@@ -5,11 +5,12 @@ from game import create_board, get_valid_locations, drop_piece, get_next_open_ro
 from agent import DQNAgent, ReplayMemory
 
 
-EPISODES = 1000
+EPISODES = 10000
 BATCH_SIZE = 64
 AI_PIECE = 1
 OPPONENT_PIECE = 2
-OPPONENT_TYPE = "random" # Random or Minimax
+OPPONENT_TYPE = "Minimax" # Random or Minimax
+MINIMAX_DEPTH = 1
 
 agent = DQNAgent()
 memory = ReplayMemory(capacity=10000)
@@ -39,10 +40,10 @@ for episode in range(EPISODES):
             memory.push(state, action, reward, next_state, game_over)
             agent.learn(memory, BATCH_SIZE)
         else:
-            if OPPONENT_TYPE == "random":
+            if OPPONENT_TYPE == "Random":
                 action = np.random.choice(valid_moves)
             else:
-                action, _ = minimax(board, 5, -math.inf, math.inf, True)
+                action, _ = minimax(board, MINIMAX_DEPTH, -math.inf, math.inf, True)
             row = get_next_open_row(board, action)
             drop_piece(board, row, action, OPPONENT_PIECE)
 
@@ -62,6 +63,6 @@ for episode in range(EPISODES):
         print(f"Episode: {episode}, Epsilon: {agent.epsilon:.3f}, Memory Size: {len(memory)}")
 
 print("Training finished!")
-model_name = "connect4_model.pth"
-torch.save(agent.policy_net.state_dict(), model_name)
-print(f"Model saved to {model_name}!")
+model_path = "model/connect4_model.pth"
+torch.save(agent.policy_net.state_dict(), model_path)
+print(f"Model saved to {model_path}!")
