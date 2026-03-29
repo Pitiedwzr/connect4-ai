@@ -6,6 +6,7 @@ COL_COUNT = 7
 PLAYER_PIECE = 1
 AI_PIECE = 2
 
+# Game Logic
 def create_board():
     return np.zeros((ROW_COUNT, COL_COUNT), dtype=int)
 
@@ -53,6 +54,53 @@ def winning_move(board, piece):
                 return True
 
     return False
+
+# Minimax
+def evaluate_window(window, piece):
+    score = 0
+    opp_piece = PLAYER_PIECE if piece == AI_PIECE else AI_PIECE
+
+    if window.count(piece) == 4:
+        score += 100
+    elif window.count(piece) == 3 and window.count(0) == 1:
+        score += 5
+    elif window.count(piece) == 2 and window.count(0) == 3:
+        score += 2
+    if window.count(opp_piece) == 3 and window.count(0) == 1:
+        score -= 4
+
+    return score
+
+def score_position(board, piece):
+    score = 0
+    center_array = [int(i) for i in list(board[:, COL_COUNT//2])]
+    score += center_array.count(piece) * 3
+
+    # Horizontal
+    for r in range(ROW_COUNT):
+        row_array = [int(i) for i in list(board[r,:])]
+        for c in range(COL_COUNT - 3):
+            window = row_array[c:c+4]
+            score += evaluate_window(window, piece)
+
+    # Vertical
+    for c in range(COL_COUNT):
+        col_array = [int(i) for i in list(board[:,c])]
+        for r in range(ROW_COUNT - 3):
+            window = col_array[r:r+4]
+            score += evaluate_window(window, piece)
+
+    # Slop Up
+    for c in range(COL_COUNT - 3):
+        for r in range(ROW_COUNT - 3):
+            window = [board[r+i][c+i] for i in range(4)]
+            score += evaluate_window(window, piece)
+
+    # Slop Down
+    for c in range(COL_COUNT - 3):
+        for r in range(3, ROW_COUNT):
+            window = [board[r-i][c+i] for i in range(4)]
+            score += evaluate_window(window, piece)
 
 # Main logic
 board = create_board()
