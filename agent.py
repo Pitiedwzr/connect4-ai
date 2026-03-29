@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import random
 import math
+import numpy as np
 from collections import deque
 
 
@@ -59,11 +60,11 @@ class DQNAgent:
 
         batch = memory.sample(batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
-        states = torch.tensor(states, dtype=torch.float32).unsqueeze(1)
+        states = torch.tensor(np.array(states), dtype=torch.float32).unsqueeze(1)
         actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1)
         rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1)
-        next_states = torch.tensor(next_states, dtype=torch.float32).unsqueeze(1)
-        donse = torch.tensor(dones, dtype=torch.float32).unsqueeze(1)
+        next_states = torch.tensor(np.array(next_states), dtype=torch.float32).unsqueeze(1)
+        dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1)
 
         current_q_value = self.policy_net(states).gather(1, actions)
         with torch.no_grad():
