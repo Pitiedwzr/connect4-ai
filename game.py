@@ -104,6 +104,63 @@ def score_position(board, piece):
 
     return score
 
+def get_valid_locations(board):
+    valid_locations = []
+    for c in range(COL_COUNT):
+        if is_valid_location(board, c):
+            valid_locations.append(c)
+    return valid_locations
+
+def is_terminal_node(board):
+    return winning_move(board, PLAYER_PIECE) or winning_move(board, AI_PIECE) or len(get_valid_locations(board)) == 0
+
+def minimax(board, depth, alpha, beta, maximizing_player):
+    valid_locations = get_valid_locations(board)
+    is_terminal = is_terminal_node(board)
+
+    if depth == 0 or is_terminal:
+        if is_terminal:
+            if winning_move(board, PLAYER_PIECE):
+                return None, -1e10
+            elif winning_move(board, AI_PIECE):
+                return None, 1e10
+            else: # Draw
+                return None, 0
+        else:
+            return None, score_position(board, AI_PIECE)
+
+    if maximizing_player: # AI
+        value = -math.inf
+        best_c = random.choice(valid_locations)
+        for c in valid_locations:
+            r = get_next_open_row(board, c)
+            b_copy = board.copy()
+            drop_piece(b_copy, r, c, AI_PIECE)
+            new_score = minimax(b_copy, depth-1, alpha, beta, False)[1]
+            if new_score >= value:
+                value = new_score
+                best_c = c
+            alpha = max(alpha, value)
+            if alpha >= beta:
+                break
+        return best_c, value
+
+    else: # PLayer
+        value = math.inf
+        best_c = random.choice(valid_locations)
+        for c in valid_locations:
+            r = get_next_open_row(board, c)
+            b_copy = board.copy()
+            drop_piece(b_copy, r, c, PLAYER_PIECE)
+            new_score = minimax(b_copy, depth-1, alpha, beta, True)[1]
+            if new_score < value:
+                value = new_score
+                best_c = c
+            beta = min(beta, value)
+            if alpha >= beta:
+                break
+        return best_c, value
+
 # Main logic
 board = create_board()
 game_over = False
