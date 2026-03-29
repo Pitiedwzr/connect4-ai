@@ -184,7 +184,8 @@ while not game_over:
             continue
 
     else:
-        piece = AI_PIECE # Leave for future implement
+        piece = AI_PIECE
+        ''' Player 2 as human
         try:
             selection = int(input(f'Player {piece}, Select an column(0-{COL_COUNT-1}): '))
             if selection < 0 or selection >= COL_COUNT:
@@ -194,13 +195,19 @@ while not game_over:
         except ValueError:
             print('Invalid input, please enter a number between 0 and 6.')
             continue
+        '''
+        selection, minimax_score = minimax(board, 5, -math.inf, math.inf, True)
+        print(f'AI selected column {selection} with score {minimax_score}.')
 
     if is_valid_location(board, selection):
         row = get_next_open_row(board, selection)
         drop_piece(board, row, selection, piece)
         if winning_move(board, piece):
             print_board(board)
-            print(f"PLAYER {piece} WINS!")
+            if piece == PLAYER_PIECE:
+                print("PLAYER WINS!")
+            else:
+                print("AI WINS!")
             game_over = True
 
         elif len(board[board == 0]) == 0: # boolean indexing, return all elements that =0 in the array
