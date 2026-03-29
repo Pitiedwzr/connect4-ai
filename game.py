@@ -163,59 +163,60 @@ def minimax(board, depth, alpha, beta, maximizing_player):
         return best_c, value
 
 # Main logic
-board = create_board()
-game_over = False
-turn = 0
+if __name__ == "__main__":
+    board = create_board()
+    game_over = False
+    turn = 0
 
-print_board(board)
+    print_board(board)
 
-while not game_over:
-    piece = 0
-    if turn == 0:
-        piece = PLAYER_PIECE
-        try:
-            selection = int(input(f'Player {piece}, Select an column(0-{COL_COUNT-1}): '))
-            if selection < 0 or selection >= COL_COUNT:
-                print(f'Invalid column, please enter a number between 0 and {COL_COUNT-1}.')
+    while not game_over:
+        piece = 0
+        if turn == 0:
+            piece = PLAYER_PIECE
+            try:
+                selection = int(input(f'Player {piece}, Select an column(0-{COL_COUNT-1}): '))
+                if selection < 0 or selection >= COL_COUNT:
+                    print(f'Invalid column, please enter a number between 0 and {COL_COUNT-1}.')
+                    continue
+
+            except ValueError:
+                print('Invalid input, please enter a number between 0 and 6.')
                 continue
 
-        except ValueError:
-            print('Invalid input, please enter a number between 0 and 6.')
-            continue
-
-    else:
-        piece = AI_PIECE
-        ''' Player 2 as human
-        try:
-            selection = int(input(f'Player {piece}, Select an column(0-{COL_COUNT-1}): '))
-            if selection < 0 or selection >= COL_COUNT:
-                print(f'Invalid column, please enter a number between 0 and {COL_COUNT-1}.')
+        else:
+            piece = AI_PIECE
+            ''' Player 2 as human
+            try:
+                selection = int(input(f'Player {piece}, Select an column(0-{COL_COUNT-1}): '))
+                if selection < 0 or selection >= COL_COUNT:
+                    print(f'Invalid column, please enter a number between 0 and {COL_COUNT-1}.')
+                    continue
+    
+            except ValueError:
+                print('Invalid input, please enter a number between 0 and 6.')
                 continue
+            '''
+            selection, minimax_score = minimax(board, 5, -math.inf, math.inf, True)
+            print(f'AI selected column {selection} with score {minimax_score}.')
 
-        except ValueError:
-            print('Invalid input, please enter a number between 0 and 6.')
-            continue
-        '''
-        selection, minimax_score = minimax(board, 5, -math.inf, math.inf, True)
-        print(f'AI selected column {selection} with score {minimax_score}.')
+        if is_valid_location(board, selection):
+            row = get_next_open_row(board, selection)
+            drop_piece(board, row, selection, piece)
+            if winning_move(board, piece):
+                print_board(board)
+                if piece == PLAYER_PIECE:
+                    print("PLAYER WINS!")
+                else:
+                    print("AI WINS!")
+                game_over = True
 
-    if is_valid_location(board, selection):
-        row = get_next_open_row(board, selection)
-        drop_piece(board, row, selection, piece)
-        if winning_move(board, piece):
+            elif len(board[board == 0]) == 0: # boolean indexing, return all elements that =0 in the array
+                print("DRAW!")
+                game_over = True
+
             print_board(board)
-            if piece == PLAYER_PIECE:
-                print("PLAYER WINS!")
-            else:
-                print("AI WINS!")
-            game_over = True
+            turn = (turn + 1) % 2
 
-        elif len(board[board == 0]) == 0: # boolean indexing, return all elements that =0 in the array
-            print("DRAW!")
-            game_over = True
-
-        print_board(board)
-        turn = (turn + 1) % 2
-
-    else:
-        print("Column is full! Please choose another one.")
+        else:
+            print("Column is full! Please choose another one.")
