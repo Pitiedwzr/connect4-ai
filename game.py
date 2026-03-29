@@ -102,6 +102,8 @@ def score_position(board, piece):
             window = [board[r-i][c+i] for i in range(4)]
             score += evaluate_window(window, piece)
 
+    return score
+
 # Main logic
 board = create_board()
 game_over = False
