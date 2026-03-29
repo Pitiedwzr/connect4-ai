@@ -138,7 +138,7 @@ def minimax(board, depth, alpha, beta, maximizing_player):
             b_copy = board.copy()
             drop_piece(b_copy, r, c, AI_PIECE)
             new_score = minimax(b_copy, depth-1, alpha, beta, False)[1]
-            if new_score >= value:
+            if new_score > value:
                 value = new_score
                 best_c = c
             alpha = max(alpha, value)
