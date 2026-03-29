@@ -1,11 +1,15 @@
 import numpy as np
 import math
 import random
+import torch
+from agent import Connect4Net
 
 ROW_COUNT = 6
 COL_COUNT = 7
 PLAYER_PIECE = 1
 AI_PIECE = 2
+CURRENT_AI = "DQN" # Minimax or DQN
+DQN_MODEL_PATH = "model/connect4_model.pth"
 
 # Game Logic
 def create_board():
@@ -168,6 +172,11 @@ if __name__ == "__main__":
     game_over = False
     turn = 0
 
+    if CURRENT_AI == "DQN":
+        dqn_ai = Connect4Net()
+        dqn_ai.load_state_dict(torch.load(DQN_MODEL_PATH, map_location=torch.device('cpu')))
+        dqn_ai.eval()
+
     print_board(board)
 
     while not game_over:
@@ -186,6 +195,7 @@ if __name__ == "__main__":
 
         else:
             piece = AI_PIECE
+            valid_moves = get_valid_locations(board)
             ''' Player 2 as human
             try:
                 selection = int(input(f'Player {piece}, Select an column(0-{COL_COUNT-1}): '))
@@ -197,8 +207,22 @@ if __name__ == "__main__":
                 print('Invalid input, please enter a number between 0 and 6.')
                 continue
             '''
-            selection, minimax_score = minimax(board, 5, -math.inf, math.inf, True)
-            print(f'AI selected column {selection} with score {minimax_score}.')
+            if CURRENT_AI == "Minimax":
+                selection, score = minimax(board, 5, -math.inf, math.inf, True)
+                print(f'Minimax selected column {selection} with score {score}.')
+            elif CURRENT_AI == "DQN":
+                state_tensor = torch.tensor(board, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+                with torch.no_grad():
+                    q_value = dqn_ai(state_tensor)[0].numpy()
+
+                max_q = -math.inf
+                selection = valid_moves[0]
+                for c in valid_moves:
+                    if q_value[c] > max_q:
+                        max_q = q_value[c]
+                        selection = c
+
+                print(f'DQN selected column {selection} with expected reward {max_q:.3f}.')
 
         if is_valid_location(board, selection):
             row = get_next_open_row(board, selection)
