@@ -11,7 +11,7 @@ from collections import deque
 class Connect4Net(nn.Module):
     def __init__(self):
         super(Connect4Net, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels=1, out_channels=32, kernel_size=4)
+        self.conv1 = nn.Conv2d(in_channels=2, out_channels=32, kernel_size=4)
         self.fc1 = nn.Linear(32*3*4, 64)
         self.out = nn.Linear(64, 7)
 
@@ -30,7 +30,7 @@ class DQNAgent:
         self.target_net.eval()
         self.epsilon = 1.0
         self.epsilon_min = 0.05
-        self.epsilon_decay = 0.999
+        self.epsilon_decay = 0.9999
         self.gamma = 0.99
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=0.001)
         self.loss_fn = nn.MSELoss()
@@ -43,8 +43,7 @@ class DQNAgent:
         else:
             # Exploitation
             with torch.no_grad():
-                state_tensor = torch.tensor(state, dtype=torch.float32)
-                state_tensor = state_tensor.unsqueeze(0).unsqueeze(0)
+                state_tensor = state
                 q_value = self.policy_net(state_tensor)
                 q_list = q_value[0].numpy()
                 max_q = -math.inf
@@ -63,7 +62,8 @@ class DQNAgent:
 
         batch = memory.sample(batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
-        states = torch.tensor(np.array(states), dtype=torch.float32).unsqueeze(1)
+        states = torch.cat(states, dim=0).to(torch.float32)
+        next_states = torch.cat(next_states, dim=0).to(torch.float32)
         actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1)
         rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1)
         next_states = torch.tensor(np.array(next_states), dtype=torch.float32).unsqueeze(1)

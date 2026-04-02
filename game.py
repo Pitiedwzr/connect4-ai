@@ -166,6 +166,17 @@ def minimax(board, depth, alpha, beta, maximizing_player):
                 break
         return best_c, value
 
+# DQN use
+def get_state_tensor(board, ai_piece, opponent_piece):
+    """
+    Converts a 6x7 numpy board into a 2-channel PyTorch tensor.
+    Returns shape: [1, 2, 6, 7]
+    """
+    ai_channel = (board == ai_piece).astype(np.float32)
+    op_channel = (board == opponent_piece).astype(np.float32)
+    stacked_channels = np.stack([ai_channel, op_channel])
+    return torch.tensor(stacked_channels).unsqueeze(0)
+
 # Main logic
 if __name__ == "__main__":
     board = create_board()
@@ -211,7 +222,8 @@ if __name__ == "__main__":
                 selection, score = minimax(board, 5, -math.inf, math.inf, True)
                 print(f'Minimax selected column {selection} with score {score}.')
             elif CURRENT_AI == "DQN":
-                state_tensor = torch.tensor(board, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+                state_tensor = get_state_tensor(board, AI_PIECE, PLAYER_PIECE)
+
                 with torch.no_grad():
                     q_value = dqn_ai(state_tensor)[0].numpy()
 
