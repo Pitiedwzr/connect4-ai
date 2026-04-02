@@ -71,7 +71,10 @@ class DQNAgent:
 
         current_q_value = self.policy_net(states).gather(1, actions)
         with torch.no_grad():
-            max_next_q_values = self.policy_net(next_states).max(1)[0].unsqueeze(1)
+            next_q_values = self.target_net(next_states)
+            # next_states shape: [64, 2, 6, 7]
+            invalid_move_mask = (next_states[:, 0, 5, :] != 0) | (next_states[:, 1, 5, :] != 0)
+            next_q_values[invalid_move_mask] = -1e9
             max_next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
 
         target_q_values = rewards + (self.gamma * max_next_q_values * (1 - dones))
