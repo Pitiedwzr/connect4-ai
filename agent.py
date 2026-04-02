@@ -34,7 +34,7 @@ class DQNAgent:
         self.target_net.eval()
         self.epsilon = 1.0
         self.epsilon_min = 0.05
-        self.epsilon_decay = 0.9999
+        self.epsilon_decay = 0.99995
         self.gamma = 0.99
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=0.001)
         self.loss_fn = nn.MSELoss()
