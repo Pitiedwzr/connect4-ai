@@ -25,6 +25,9 @@ class Connect4Net(nn.Module):
 class DQNAgent:
     def __init__(self):
         self.policy_net = Connect4Net()
+        self.target_net = Connect4Net()
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()
         self.epsilon = 1.0
         self.epsilon_min = 0.05
         self.epsilon_decay = 0.999
@@ -69,6 +72,7 @@ class DQNAgent:
         current_q_value = self.policy_net(states).gather(1, actions)
         with torch.no_grad():
             max_next_q_values = self.policy_net(next_states).max(1)[0].unsqueeze(1)
+            max_next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
 
         target_q_values = rewards + (self.gamma * max_next_q_values * (1 - dones))
         loss = self.loss_fn(current_q_value, target_q_values)

@@ -61,6 +61,7 @@ for episode in range(EPISODES):
 
     if episode % 100 == 0:
         print(f"Episode: {episode}, Epsilon: {agent.epsilon:.3f}, Memory Size: {len(memory)}")
+        agent.target_net.load_state_dict(agent.policy_net.state_dict())
 
 print("Training finished!")
 model_path = "model/connect4_model.pth"
