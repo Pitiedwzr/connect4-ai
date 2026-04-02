@@ -20,6 +20,7 @@ memory = ReplayMemory(capacity=50000)
 win_count = 0
 lose_count = 0
 draw_count = 0
+recent_rewards = 0
 
 print('Starting training...')
 for episode in range(EPISODES):
@@ -80,15 +81,17 @@ for episode in range(EPISODES):
 
         turn = (turn + 1) % 2
 
+    recent_rewards += episode_reward
+
     if agent.epsilon > agent.epsilon_min:
         agent.epsilon *= agent.epsilon_decay
 
-    if episode % 100 == 0:
+    if episode > 0 and episode % 100 == 0:
         agent.target_net.load_state_dict(agent.policy_net.state_dict())
         winning_rate = win_count / (win_count + lose_count + draw_count)
-        mean_reward = episode_reward / 100
+        mean_reward = recent_rewards / 100
         print(f"Episode: {episode} | WinRate: {winning_rate:.2%} | AvgReward: {mean_reward:.4f} | Epsilon: {agent.epsilon:.3f}")
-        win_count, lose_count, draw_count, episode_reward = 0, 0, 0, 0
+        win_count, lose_count, draw_count, recent_rewards = 0, 0, 0, 0
 
 print("Training finished!")
 model_path = "model/connect4_model.pth"
