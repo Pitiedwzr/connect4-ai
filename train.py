@@ -1,11 +1,13 @@
+import math
+import random
+
 import numpy as np
 import torch
-import math
-from game import create_board, get_valid_locations, drop_piece, get_next_open_row, winning_move, minimax
+
 from agent import DQNAgent, ReplayMemory
+from game import create_board, get_valid_locations, drop_piece, get_next_open_row, winning_move, minimax, get_state_tensor
 
-
-EPISODES = 10000
+EPISODES = 200000
 BATCH_SIZE = 64
 AI_PIECE = 1
 OPPONENT_PIECE = 2
