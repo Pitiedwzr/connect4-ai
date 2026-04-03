@@ -6,6 +6,7 @@ import random
 import math
 from collections import deque
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Connect4Net(nn.Module):
     def __init__(self):
@@ -27,8 +28,8 @@ class Connect4Net(nn.Module):
 
 class DQNAgent:
     def __init__(self):
-        self.policy_net = Connect4Net()
-        self.target_net = Connect4Net()
+        self.policy_net = Connect4Net().to(device)
+        self.target_net = Connect4Net().to(device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
         self.epsilon = 1.0
@@ -65,11 +66,11 @@ class DQNAgent:
 
         batch = memory.sample(batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
-        states = torch.cat(states, dim=0).to(torch.float32)
-        next_states = torch.cat(next_states, dim=0).to(torch.float32)
-        actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1)
-        rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1)
-        dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1)
+        states = torch.cat(states, dim=0).to(torch.float32).to(device)
+        next_states = torch.cat(next_states, dim=0).to(torch.float32).to(device)
+        actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to(device)
+        rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
+        dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(device)
 
         current_q_value = self.policy_net(states).gather(1, actions)
         with torch.no_grad():

@@ -184,8 +184,9 @@ if __name__ == "__main__":
     turn = 0
 
     if CURRENT_AI == "DQN":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         dqn_ai = Connect4Net()
-        dqn_ai.load_state_dict(torch.load(DQN_MODEL_PATH, map_location=torch.device('cpu')))
+        dqn_ai.load_state_dict(torch.load(DQN_MODEL_PATH, map_location=device))
         dqn_ai.eval()
 
     print_board(board)
