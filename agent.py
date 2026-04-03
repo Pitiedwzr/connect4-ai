@@ -6,8 +6,6 @@ import random
 import math
 from collections import deque
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 class Connect4Net(nn.Module):
     def __init__(self):
         super(Connect4Net, self).__init__()
@@ -28,8 +26,9 @@ class Connect4Net(nn.Module):
 
 class DQNAgent:
     def __init__(self):
-        self.policy_net = Connect4Net().to(device)
-        self.target_net = Connect4Net().to(device)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.policy_net = Connect4Net().to(self.device)
+        self.target_net = Connect4Net().to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
         self.epsilon = 1.0
@@ -48,17 +47,16 @@ class DQNAgent:
             # Exploitation
             with torch.no_grad():
                 state_tensor = state
-                q_value = self.policy_net(state_tensor)
-                q_list = q_value[0].numpy()
-                max_q = -math.inf
-                best_action = valid_locations[0]
-                for c in valid_locations:
-                    q = q_list[c]
-                    if q > max_q:
-                        max_q = q
-                        best_action = c
+                q_value = self.policy_net(state_tensor)[0].cpu().numpy()
+            max_q = -math.inf
+            best_action = valid_locations[0]
+            for c in valid_locations:
+                q = q_value[c]
+                if q > max_q:
+                    max_q = q
+                    best_action = c
 
-                return best_action
+            return best_action
 
     def learn(self, memory, batch_size):
         if len(memory) < batch_size:
@@ -66,11 +64,11 @@ class DQNAgent:
 
         batch = memory.sample(batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
-        states = torch.cat(states, dim=0).to(torch.float32).to(device)
-        next_states = torch.cat(next_states, dim=0).to(torch.float32).to(device)
-        actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to(device)
-        rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(device)
-        dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(device)
+        states = torch.cat(states, dim=0).to(torch.float32).to(self.device)
+        next_states = torch.cat(next_states, dim=0).to(torch.float32).to(self.device)
+        actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to(self.device)
+        rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(self.device)
+        dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(self.device)
 
         current_q_value = self.policy_net(states).gather(1, actions)
         with torch.no_grad():
