@@ -4,7 +4,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 import random
 import math
-import numpy as np
 from collections import deque
 
 

@@ -30,6 +30,7 @@ for episode in range(EPISODES):
     episode_reward = 0
     ai_state = None
     ai_action = None
+    op_action = None
 
     while not game_over:
         valid_moves = get_valid_locations(board)
