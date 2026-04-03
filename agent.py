@@ -46,7 +46,7 @@ class DQNAgent:
         else:
             # Exploitation
             with torch.no_grad():
-                state_tensor = state
+                state_tensor = state.to(self.device)
                 q_value = self.policy_net(state_tensor)[0].cpu().numpy()
             max_q = -math.inf
             best_action = valid_locations[0]
