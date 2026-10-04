@@ -532,10 +532,10 @@ class Connect4GUI:
         y += 28
 
         opponents = [
-            ("DQN", "🤖 DQN Neural Network"),
-            ("Minimax", "🧠 Minimax Tree Search"),
-            ("Random", "🎲 Tactical Random AI"),
-            ("Human", "👤 Local 2-Player (PvP)")
+            ("DQN", "DQN Neural Network"),
+            ("Minimax", "Minimax Tree Search"),
+            ("Random", "Tactical Random AI"),
+            ("Human", "Local 2-Player (PvP)")
         ]
 
         for key, label in opponents:
@@ -564,8 +564,8 @@ class Connect4GUI:
         y += 28
 
         orders = [
-            ("Human", "🔴 Player First"),
-            ("AI", "🟡 AI First")
+            ("Human", "[Red] Player First"),
+            ("AI", "[Yellow] AI First")
         ]
         half_w = (content_w - 10) // 2
         for i, (key, label) in enumerate(orders):
@@ -576,15 +576,15 @@ class Connect4GUI:
 
         # --- Section 4: Game Actions ---
         btn_new = pygame.Rect(pad_x, y, content_w, 42)
-        self.draw_action_button(btn_new, "✨ New Game", COLOR_BTN_ACTIVE, self.reset_game)
+        self.draw_action_button(btn_new, "New Game", COLOR_BTN_ACTIVE, self.reset_game)
         y += 50
 
         btn_undo = pygame.Rect(pad_x, y, (content_w - 10) // 2, 38)
-        self.draw_action_button(btn_undo, "↩ Undo Move", COLOR_BTN_DEFAULT, self.undo_move)
+        self.draw_action_button(btn_undo, "Undo Move", COLOR_BTN_DEFAULT, self.undo_move)
 
         btn_ai_mode = pygame.Rect(pad_x + (content_w - 10) // 2 + 10, y, (content_w - 10) // 2, 38)
         ai_vs_ai_color = COLOR_BTN_DANGER if self.ai_vs_ai else COLOR_BTN_DEFAULT
-        ai_vs_ai_txt = "⏹ Stop Watch" if self.ai_vs_ai else "🤖 AI vs AI"
+        ai_vs_ai_txt = "⏹ Stop Watch" if self.ai_vs_ai else "AI vs AI"
         self.draw_action_button(btn_ai_mode, ai_vs_ai_txt, ai_vs_ai_color, self.toggle_ai_vs_ai)
 
     def draw_status_card(self, x, y, w):
@@ -595,13 +595,13 @@ class Connect4GUI:
         # Status text rendering
         if self.game_over:
             if self.winner == PLAYER_PIECE:
-                status_title = "🎉 Red Player Wins!"
+                status_title = "Red Player Wins!"
                 status_color = COLOR_RED
             elif self.winner == AI_PIECE:
-                status_title = "🏆 Yellow Player Wins!"
+                status_title = "Yellow Player Wins!"
                 status_color = COLOR_YELLOW
             else:
-                status_title = "🤝 Game Drawn!"
+                status_title = "Game Drawn!"
                 status_color = COLOR_TEXT_MUTED
             sub_info = "Click [New Game] to restart"
         elif self.ai_worker.is_thinking:
@@ -611,11 +611,11 @@ class Connect4GUI:
             sub_info = f"Engine: {self.get_opponent_display_name()}"
         else:
             if self.turn == 0:
-                status_title = "🔴 Turn: Red (P1)"
+                status_title = "Turn: Red (P1)"
                 status_color = COLOR_RED
                 who = "Player" if (self.first_mover == "Human" and not self.ai_vs_ai) else "AI Agent"
             else:
-                status_title = "🟡 Turn: Yellow (P2)"
+                status_title = "Turn: Yellow (P2)"
                 status_color = COLOR_YELLOW
                 who = "Player" if (self.first_mover == "AI" and not self.ai_vs_ai) else "AI Agent"
             sub_info = f"Controlled by {who} • Ply: {len(self.move_history)}"
