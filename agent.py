@@ -33,10 +33,10 @@ class DQNAgent:
         self.target_net.eval()
         self.epsilon = 1.0
         self.epsilon_min = 0.05
-        self.epsilon_decay = 0.99995
+        self.epsilon_decay = 0.9995
         self.gamma = 0.99
-        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=0.001)
-        self.loss_fn = nn.MSELoss()
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=0.0005)
+        self.loss_fn = nn.SmoothL1Loss()
 
     def act(self, state, valid_locations):
         if random.random() < self.epsilon:
