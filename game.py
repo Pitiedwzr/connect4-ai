@@ -2,7 +2,7 @@ import numpy as np
 import math
 import random
 import torch
-from agent import Connect4Net
+from agent import DuelingConnect4Net
 
 ROW_COUNT = 6
 COL_COUNT = 7
@@ -60,6 +60,37 @@ def winning_move(board, piece):
 
     return False
 
+def get_winning_coordinates(board, piece):
+    """
+    Finds the 4 coordinates [(r, c), ...] that form a 4-in-a-row for piece.
+    Returns None if no winning line exists.
+    """
+    # Horizontal
+    for c in range(COL_COUNT - 3):
+        for r in range(ROW_COUNT):
+            if all(board[r][c+i] == piece for i in range(4)):
+                return [(r, c+i) for i in range(4)]
+
+    # Vertical
+    for r in range(ROW_COUNT - 3):
+        for c in range(COL_COUNT):
+            if all(board[r+i][c] == piece for i in range(4)):
+                return [(r+i, c) for i in range(4)]
+
+    # Slope Up
+    for c in range(COL_COUNT - 3):
+        for r in range(ROW_COUNT - 3):
+            if all(board[r+i][c+i] == piece for i in range(4)):
+                return [(r+i, c+i) for i in range(4)]
+
+    # Slope Down
+    for c in range(COL_COUNT - 3):
+        for r in range(3, ROW_COUNT):
+            if all(board[r-i][c+i] == piece for i in range(4)):
+                return [(r-i, c+i) for i in range(4)]
+
+    return None
+
 def get_immediate_winning_move(board, piece):
     for c in get_valid_locations(board):
         r = get_next_open_row(board, c)
@@ -70,10 +101,30 @@ def get_immediate_winning_move(board, piece):
             return c
     return None
 
+def is_suicide_move(board, col, my_piece, opp_piece):
+    row = get_next_open_row(board, col)
+    if row is None:
+        return False
+
+    if row + 1 >= ROW_COUNT:
+        return False
+
+    board[row][col] = my_piece
+
+    board[row + 1][col] = opp_piece
+
+    opp_wins = winning_move(board, opp_piece)
+
+    board[row + 1][col] = 0
+    board[row][col] = 0
+
+    return opp_wins
+
 # Minimax
-def evaluate_window(window, piece):
+def evaluate_window(window, piece, opp_piece=None):
     score = 0
-    opp_piece = PLAYER_PIECE if piece == AI_PIECE else AI_PIECE
+    if opp_piece is None:
+        opp_piece = PLAYER_PIECE if piece == AI_PIECE else AI_PIECE
 
     if window.count(piece) == 4:
         score += 100
@@ -86,8 +137,10 @@ def evaluate_window(window, piece):
 
     return score
 
-def score_position(board, piece):
+def score_position(board, piece, opp_piece=None):
     score = 0
+    if opp_piece is None:
+        opp_piece = PLAYER_PIECE if piece == AI_PIECE else AI_PIECE
     center_array = [int(i) for i in list(board[:, COL_COUNT//2])]
     score += center_array.count(piece) * 3
 
@@ -96,26 +149,26 @@ def score_position(board, piece):
         row_array = [int(i) for i in list(board[r,:])]
         for c in range(COL_COUNT - 3):
             window = row_array[c:c+4]
-            score += evaluate_window(window, piece)
+            score += evaluate_window(window, piece, opp_piece)
 
     # Vertical
     for c in range(COL_COUNT):
         col_array = [int(i) for i in list(board[:,c])]
         for r in range(ROW_COUNT - 3):
             window = col_array[r:r+4]
-            score += evaluate_window(window, piece)
+            score += evaluate_window(window, piece, opp_piece)
 
     # Slop Up
     for c in range(COL_COUNT - 3):
         for r in range(ROW_COUNT - 3):
             window = [board[r+i][c+i] for i in range(4)]
-            score += evaluate_window(window, piece)
+            score += evaluate_window(window, piece, opp_piece)
 
     # Slop Down
     for c in range(COL_COUNT - 3):
         for r in range(3, ROW_COUNT):
             window = [board[r-i][c+i] for i in range(4)]
-            score += evaluate_window(window, piece)
+            score += evaluate_window(window, piece, opp_piece)
 
     return score
 
@@ -129,20 +182,20 @@ def get_valid_locations(board):
 def is_terminal_node(board):
     return winning_move(board, PLAYER_PIECE) or winning_move(board, AI_PIECE) or len(get_valid_locations(board)) == 0
 
-def minimax(board, depth, alpha, beta, maximizing_player):
+def minimax(board, depth, alpha, beta, maximizing_player, ai_piece=AI_PIECE, player_piece=PLAYER_PIECE):
     valid_locations = get_valid_locations(board)
-    is_terminal = is_terminal_node(board)
+    is_terminal = winning_move(board, player_piece) or winning_move(board, ai_piece) or len(valid_locations) == 0
 
     if depth == 0 or is_terminal:
         if is_terminal:
-            if winning_move(board, PLAYER_PIECE):
+            if winning_move(board, player_piece):
                 return None, -1e10
-            elif winning_move(board, AI_PIECE):
+            elif winning_move(board, ai_piece):
                 return None, 1e10
             else: # Draw
                 return None, 0
         else:
-            return None, score_position(board, AI_PIECE)
+            return None, score_position(board, ai_piece, player_piece)
 
     if maximizing_player: # AI
         value = -math.inf
@@ -150,8 +203,8 @@ def minimax(board, depth, alpha, beta, maximizing_player):
         for c in valid_locations:
             r = get_next_open_row(board, c)
             b_copy = board.copy()
-            drop_piece(b_copy, r, c, AI_PIECE)
-            new_score = minimax(b_copy, depth-1, alpha, beta, False)[1]
+            drop_piece(b_copy, r, c, ai_piece)
+            new_score = minimax(b_copy, depth-1, alpha, beta, False, ai_piece, player_piece)[1]
             if new_score > value:
                 value = new_score
                 best_c = c
@@ -166,8 +219,8 @@ def minimax(board, depth, alpha, beta, maximizing_player):
         for c in valid_locations:
             r = get_next_open_row(board, c)
             b_copy = board.copy()
-            drop_piece(b_copy, r, c, PLAYER_PIECE)
-            new_score = minimax(b_copy, depth-1, alpha, beta, True)[1]
+            drop_piece(b_copy, r, c, player_piece)
+            new_score = minimax(b_copy, depth-1, alpha, beta, True, ai_piece, player_piece)[1]
             if new_score < value:
                 value = new_score
                 best_c = c
@@ -195,7 +248,7 @@ if __name__ == "__main__":
 
     if CURRENT_AI == "DQN":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        dqn_ai = Connect4Net().to(device)
+        dqn_ai = DuelingConnect4Net().to(device)
         dqn_ai.load_state_dict(torch.load(DQN_MODEL_PATH, map_location=device))
         dqn_ai.eval()
 
@@ -246,14 +299,18 @@ if __name__ == "__main__":
                     selection = block_c
                     print(f'DQN selected column {selection} (immediate blocking move).')
                 else:
+                    safe_moves = [c for c in valid_moves if not is_suicide_move(board, c, AI_PIECE, PLAYER_PIECE)]
+
+                    candidate_moves = safe_moves if len(safe_moves) > 0 else valid_moves
+
                     state_tensor = get_state_tensor(board, AI_PIECE, PLAYER_PIECE).to(device)
 
                     with torch.no_grad():
                         q_value = dqn_ai(state_tensor)[0].cpu().numpy()
 
                     max_q = -math.inf
-                    selection = valid_moves[0]
-                    for c in valid_moves:
+                    selection = candidate_moves[0]
+                    for c in candidate_moves:
                         if q_value[c] > max_q:
                             max_q = q_value[c]
                             selection = c
