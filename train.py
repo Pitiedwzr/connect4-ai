@@ -11,7 +11,7 @@ from game import (
     is_suicide_move
 )
 
-EPISODES = 10000
+EPISODES = 50000
 BATCH_SIZE = 64
 WARMUP_STEPS = 1000
 AI_PIECE = 1
