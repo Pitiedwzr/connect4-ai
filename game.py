@@ -60,6 +60,16 @@ def winning_move(board, piece):
 
     return False
 
+def get_immediate_winning_move(board, piece):
+    for c in get_valid_locations(board):
+        r = get_next_open_row(board, c)
+        board[r][c] = piece
+        is_win = winning_move(board, piece)
+        board[r][c] = 0
+        if is_win:
+            return c
+    return None
+
 # Minimax
 def evaluate_window(window, piece):
     score = 0
@@ -223,7 +233,17 @@ if __name__ == "__main__":
                 selection, score = minimax(board, 5, -math.inf, math.inf, True)
                 print(f'Minimax selected column {selection} with score {score}.')
             elif CURRENT_AI == "DQN":
-                state_tensor = get_state_tensor(board, AI_PIECE, PLAYER_PIECE)
+                # 1-ply tactical check: immediate win or block
+                win_c = get_immediate_winning_move(board, AI_PIECE)
+                block_c = get_immediate_winning_move(board, PLAYER_PIECE)
+                if win_c is not None:
+                    selection = win_c
+                    print(f'DQN selected column {selection} (immediate winning move).')
+                elif block_c is not None:
+                    selection = block_c
+                    print(f'DQN selected column {selection} (immediate blocking move).')
+                else:
+                    state_tensor = get_state_tensor(board, AI_PIECE, PLAYER_PIECE).to(device)
 
                 with torch.no_grad():
                     q_value = dqn_ai(state_tensor)[0].numpy()

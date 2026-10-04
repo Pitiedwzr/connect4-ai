@@ -68,6 +68,13 @@ class DQNAgent:
 
             return best_action
 
+    def update_target_network(self, tau=None):
+        if tau is None:
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+        else:
+            for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
+                target_param.data.copy_(tau * policy_param.data + (1.0 - tau) * target_param.data)
+
     def learn(self, memory, batch_size):
         if len(memory) < batch_size:
             return
@@ -82,16 +89,20 @@ class DQNAgent:
 
         current_q_value = self.policy_net(states).gather(1, actions)
         with torch.no_grad():
-            next_q_values = self.target_net(next_states)
             # next_states shape: [64, 2, 6, 7]
             invalid_move_mask = (next_states[:, 0, 5, :] != 0) | (next_states[:, 1, 5, :] != 0)
-            next_q_values[invalid_move_mask] = -1e9
-            max_next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
+            policy_next_q = self.policy_net(next_states)
+            policy_next_q[invalid_move_mask] = -1e4
+            next_actions = policy_next_q.argmax(dim=1, keepdim=True)
+
+            target_next_q = self.target_net(next_states)
+            max_next_q_values = target_next_q.gather(1, next_actions)
 
         target_q_values = rewards + (self.gamma * max_next_q_values * (1 - dones))
-        loss = self.loss_fn(current_q_value, target_q_values)
+        loss = F.smooth_l1_loss(current_q_value, target_q_values)
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
         self.optimizer.step()
 
 class ReplayMemory():
