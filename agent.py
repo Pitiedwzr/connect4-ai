@@ -38,7 +38,17 @@ class DQNAgent:
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=0.0005)
         self.loss_fn = nn.SmoothL1Loss()
 
-    def act(self, state, valid_locations):
+    def act(self, state, valid_locations, board=None, my_piece=None, opp_piece=None):
+        # 1-ply tactical check: take immediate winning move or block opponent's winning move
+        if board is not None and my_piece is not None and opp_piece is not None:
+            from game import get_immediate_winning_move
+            win_move = get_immediate_winning_move(board, my_piece)
+            if win_move is not None:
+                return win_move
+            block_move = get_immediate_winning_move(board, opp_piece)
+            if block_move is not None:
+                return block_move
+
         if random.random() < self.epsilon:
             # Exploration
             action = random.choice(valid_locations)
