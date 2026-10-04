@@ -195,9 +195,12 @@ if __name__ == "__main__":
 
     if CURRENT_AI == "DQN":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        dqn_ai = Connect4Net()
+        dqn_ai = Connect4Net().to(device)
         dqn_ai.load_state_dict(torch.load(DQN_MODEL_PATH, map_location=device))
         dqn_ai.eval()
+
+    first_choice = input("Do you want to play first? (y/n, default y): ").strip().lower()
+    turn = 0 if first_choice != 'n' else 1
 
     print_board(board)
 
@@ -245,17 +248,17 @@ if __name__ == "__main__":
                 else:
                     state_tensor = get_state_tensor(board, AI_PIECE, PLAYER_PIECE).to(device)
 
-                with torch.no_grad():
-                    q_value = dqn_ai(state_tensor)[0].numpy()
+                    with torch.no_grad():
+                        q_value = dqn_ai(state_tensor)[0].cpu().numpy()
 
-                max_q = -math.inf
-                selection = valid_moves[0]
-                for c in valid_moves:
-                    if q_value[c] > max_q:
-                        max_q = q_value[c]
-                        selection = c
+                    max_q = -math.inf
+                    selection = valid_moves[0]
+                    for c in valid_moves:
+                        if q_value[c] > max_q:
+                            max_q = q_value[c]
+                            selection = c
 
-                print(f'DQN selected column {selection} with expected reward {max_q:.3f}.')
+                    print(f'DQN selected column {selection} with expected reward {max_q:.3f}.')
 
         if is_valid_location(board, selection):
             row = get_next_open_row(board, selection)

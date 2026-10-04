@@ -106,11 +106,19 @@ class DQNAgent:
         self.optimizer.step()
 
 class ReplayMemory():
-    def __init__(self, capacity=10000):
+    def __init__(self, capacity=50000):
         self.memory = deque(maxlen=capacity)
 
     def push(self, state, action, reward, next_state, done):
         self.memory.append((state, action, reward, next_state, done))
+
+    def push_with_symmetry(self, state, action, reward, next_state, done):
+        """Saves both the original and horizontally mirrored transition."""
+        self.push(state, action, reward, next_state, done)
+        state_flip = torch.flip(state, dims=[3])
+        next_state_flip = torch.flip(next_state, dims=[3])
+        action_flip = 6 - action
+        self.push(state_flip, action_flip, reward, next_state_flip, done)
 
     def sample(self, batch_size):
         return random.sample(self.memory, batch_size)
