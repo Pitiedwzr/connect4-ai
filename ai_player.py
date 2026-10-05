@@ -14,6 +14,7 @@ from game import (
 )
 from agent import DuelingConnect4Net
 from benchmark import network_move
+from alphazero import AlphaZeroAgent, DEFAULT_MODEL_PATH, load_checkpoint
 
 # Custom Pygame event for asynchronous AI move completion
 AI_MOVE_EVENT = pygame.USEREVENT + 1
@@ -40,6 +41,20 @@ class DQNPlayer(BaseAIPlayer):
 
     def get_move(self, board):
         return network_move(self.net, board, self.my_piece, self.opp_piece)
+
+
+class AlphaZeroPlayer(BaseAIPlayer):
+    def __init__(self, my_piece=AI_PIECE, opp_piece=PLAYER_PIECE,
+                 model_path=DEFAULT_MODEL_PATH, simulations=128):
+        super().__init__(my_piece, opp_piece, name=f"AlphaZero ({simulations} simulations)")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model, _ = load_checkpoint(model_path, device)
+        if (model.config.rows, model.config.cols, model.config.connect) != (6, 7, 4):
+            raise ValueError("The GUI uses a standard 6x7 Connect 4 checkpoint")
+        self.agent = AlphaZeroAgent(model, simulations)
+
+    def get_move(self, board):
+        return self.agent.get_move(board, self.my_piece, self.opp_piece)
 
 
 class MinimaxPlayer(BaseAIPlayer):

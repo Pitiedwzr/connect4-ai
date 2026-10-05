@@ -3,7 +3,7 @@ Connect 4 AI - Pygame GUI with relative position advantage
 Features:
 - Crisp High-DPI Awareness & Anti-Aliased Graphics (Zero Blur)
 - Relative position advantage bar (DQN estimate or heuristic)
-- Multiple opponent types: DQN, Minimax (Depth 2/4/5), Tactical Random, 2-Player Pass & Play
+- Opponents: DQN, AlphaZero, Minimax (Depth 2/4/5), Tactical Random, local 2-player
 - Smooth 60 FPS piece dropping physics animation
 - Asynchronous AI computation (non-blocking, zero GUI stutter)
 - Move history, Smart Undo, Reset, and AI vs AI Spectator Mode
@@ -42,7 +42,7 @@ from game import (
     AI_PIECE,
 )
 from evaluator import PositionEvaluator
-from ai_player import DQNPlayer, MinimaxPlayer, RandomPlayer, AsyncAIWorker, AI_MOVE_EVENT
+from ai_player import DQNPlayer, AlphaZeroPlayer, MinimaxPlayer, RandomPlayer, AsyncAIWorker, AI_MOVE_EVENT
 
 # --- Pygame Initialization ---
 pygame.init()
@@ -153,6 +153,7 @@ class Connect4GUI:
         # Settings
         self.opponent_type = "DQN"     # "DQN", "Minimax", "Random", "Human"
         self.minimax_depth = 4         # 2, 4, 5
+        self.alpha_simulations = 128   # 64, 128, 256
         self.first_mover = "Human"     # "Human" (Player is Red), "AI" (AI is Red)
         self.ai_vs_ai = False
 
@@ -186,14 +187,19 @@ class Connect4GUI:
                 current_piece = PLAYER_PIECE
                 opp_piece = AI_PIECE
 
-        key = (self.opponent_type, current_piece, self.minimax_depth)
+        key = (self.opponent_type, current_piece, self.minimax_depth, self.alpha_simulations)
         if key not in self.ai_players:
-            if self.opponent_type == "DQN":
+            if self.opponent_type in ("DQN", "AlphaZero"):
                 try:
-                    player = DQNPlayer(my_piece=current_piece, opp_piece=opp_piece)
+                    if self.opponent_type == "AlphaZero":
+                        player = AlphaZeroPlayer(my_piece=current_piece, opp_piece=opp_piece,
+                                                 simulations=self.alpha_simulations)
+                    else:
+                        player = DQNPlayer(my_piece=current_piece, opp_piece=opp_piece)
                 except (OSError, RuntimeError, ValueError) as exc:
-                    print(f"[GUI] DQN unavailable; using minimax: {exc}")
+                    print(f"[GUI] {self.opponent_type} unavailable; using minimax: {exc}")
                     self.opponent_type = "Minimax"
+                    self.evaluator = PositionEvaluator()
                     return self.get_current_ai_player()
             elif self.opponent_type == "Minimax":
                 player = MinimaxPlayer(my_piece=current_piece, opp_piece=opp_piece, depth=self.minimax_depth)
@@ -543,6 +549,7 @@ class Connect4GUI:
 
         opponents = [
             ("DQN", "DQN Neural Network"),
+            ("AlphaZero", "AlphaZero Policy + Search"),
             ("Minimax", "Minimax Tree Search"),
             ("Random", "Tactical Random AI"),
             ("Human", "Local 2-Player (PvP)")
@@ -553,6 +560,15 @@ class Connect4GUI:
             btn_rect = pygame.Rect(pad_x, y, content_w, 36)
             self.draw_radio_item(btn_rect, label, is_active, lambda k=key: self.set_opponent(k))
             y += 42
+
+        if self.opponent_type == "AlphaZero":
+            label = FONT_SMALL.render("Search:", True, COLOR_TEXT_MUTED)
+            screen.blit(label, (pad_x + 6, y + 3))
+            for i, simulations in enumerate((64, 128, 256)):
+                rect = pygame.Rect(pad_x + 60 + i * 70, y - 2, 64, 28)
+                self.draw_pill_button(rect, str(simulations), simulations == self.alpha_simulations,
+                                      lambda n=simulations: self.set_alpha_simulations(n))
+            y += 36
 
         # Minimax Depth Selector
         if self.opponent_type == "Minimax":
@@ -648,6 +664,8 @@ class Connect4GUI:
             return "AI vs AI Spectator"
         if self.opponent_type == "DQN":
             return "DQN Deep Neural Net"
+        elif self.opponent_type == "AlphaZero":
+            return f"AlphaZero ({self.alpha_simulations} simulations)"
         elif self.opponent_type == "Minimax":
             depth_map = {2: "Easy", 4: "Med", 5: "Hard"}
             return f"Minimax ({depth_map.get(self.minimax_depth, '')} - Depth {self.minimax_depth})"
@@ -708,6 +726,7 @@ class Connect4GUI:
     def set_opponent(self, opp):
         if self.opponent_type != opp:
             self.opponent_type = opp
+            self.evaluator = PositionEvaluator(algorithm="alphazero" if opp == "AlphaZero" else "dqn")
             self.ai_vs_ai = False
             self.reset_game()
 
@@ -715,6 +734,12 @@ class Connect4GUI:
         if self.minimax_depth != depth:
             self.minimax_depth = depth
             if self.opponent_type == "Minimax":
+                self.reset_game()
+
+    def set_alpha_simulations(self, simulations):
+        if self.alpha_simulations != simulations:
+            self.alpha_simulations = simulations
+            if self.opponent_type == "AlphaZero":
                 self.reset_game()
 
     def set_first_mover(self, mover):

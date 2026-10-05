@@ -115,3 +115,137 @@ Tests cover wins, blocks, support traps, forks, mirrored replay masks, legal
 fallbacks in lost positions, target-network normalization, constrained bootstraps,
 terminal targets, reproducible evaluation, and a short Accelerate CPU training run
 that saves and reloads a temporary checkpoint.
+
+## AlphaZero experiments
+
+`alphazero.py` implements a separate learning agent inspired by the
+[AlphaZero paper](https://arxiv.org/pdf/1712.01815). Its network predicts a policy
+over columns and a value for the side to move. PUCT search uses both predictions
+to explore possible continuations. Self-play records the resulting visit
+distribution and final outcome, and trains both heads on those targets.
+
+This path uses **game rules only**: legal columns and exact wins/draws. It does not
+use DQN's forced center opening, tactical filters, minimax labels, or handcrafted
+position scores. An untrained model has no learned strategy; the purpose is to
+observe strategy emerge through search-guided self-play.
+
+The default network has four residual blocks with 64 channels, a column policy
+head, and a `tanh` value head. GroupNorm keeps leaf evaluation independent of
+the inference batch size. It is a compact experimental implementation, not a
+reproduction of DeepMind's model scale or results.
+
+### Start training
+
+For a smaller CPU experiment:
+
+```powershell
+uv run train_alphazero.py --cpu --iterations 200 --games-per-iteration 8 --simulations 32 --channels 32 --blocks 2 --log model/alpha_training.jsonl
+```
+
+With a GPU, omit `--cpu`. The standard defaults use eight concurrent self-play
+games, 64 new simulations per move, and 20 optimizer steps per iteration:
+
+```powershell
+uv run train_alphazero.py --iterations 1000 --log model/alpha_training.jsonl
+```
+
+The recommended starting budgets are experiments, not a guarantee of strong play
+after a particular number of iterations. More simulations can improve search but
+also slow data collection. Compare elapsed time, games, raw policy performance,
+and search-assisted performance rather than loss alone.
+
+One leaf from each active game is evaluated in a batch at each search simulation.
+Each game reuses its tree between moves and caches network evaluations while
+weights remain frozen. Root Dirichlet noise and sampling from visit counts provide
+self-play exploration; after the first ten plies, action selection becomes greedy.
+Training targets retain normalized visit distributions. Evaluation adds no noise
+and chooses the most visited move.
+
+Both players contribute training positions in their own perspective. Value targets
+are `+1` for an eventual win, `-1` for a loss, and `0` for a draw, without discounting.
+Each edge reverses the value sign during search backup. Horizontal reflection
+augments boards and policy distributions. The loss combines masked policy cross
+entropy and value MSE, with AdamW weight decay.
+
+Self-play's red/yellow win counts describe its own games; they are **not** a measure
+of improvement against an external opponent. Training emits one JSON record per
+iteration with games, replay positions, policy/value loss, and elapsed time. Use
+the benchmark to measure learned behavior and playing strength.
+
+### Save and resume
+
+The default checkpoint is `model/connect4_alphazero.pth`, separate from DQN.
+It includes architecture/game configuration, weights, optimizer state, replay,
+iteration/game counts, and RNG state. Checkpoints are written every ten iterations
+and at normal completion; `--checkpoint-every` and `--output` are configurable.
+An interrupted write preserves the last complete checkpoint.
+
+```powershell
+uv run train_alphazero.py --cpu --resume model/connect4_alphazero.pth --iterations 200 --log model/alpha_training.jsonl
+```
+
+`--iterations` means **additional** iterations on resume. The checkpoint's network
+dimensions/channels/blocks are reused. Saved training settings are also reused
+unless explicitly overridden on the command line. On one process, replay,
+optimizer, and RNG restore support continuation of the same experiment.
+Without an explicit `--output`, resume saves back to its input checkpoint.
+
+Accelerate can distribute independent self-play groups and synchronize training:
+
+```powershell
+uv run accelerate launch --num_processes 2 train_alphazero.py --iterations 1000
+```
+
+Games per iteration and replay capacity are per process; reported games are global.
+Distributed resume restores weights and optimizer but starts fresh local replay
+and RNG streams; it does not claim bit-for-bit continuation across ranks. CUDA and
+multi-process execution require validation on the target hardware.
+
+### Compare policy and search
+
+```powershell
+uv run benchmark.py --agent alphazero --cpu --games 50 --simulations 128
+uv run benchmark.py --agent alphazero --cpu --games 50 --raw
+uv run benchmark.py --agent alphazero --cpu --games 50 --simulations 128 --dqn-opponent model/connect4_model_selfplay.pth
+```
+
+AlphaZero uses the same paired opening suite and standard-board opponents as DQN.
+Reports include raw opening policy/value predictions, search budget, mode, and
+W/D/L by seat. `--raw` selects from legal policy logits without search. The optional
+DQN opponent uses its existing tactical policy. For fair speed comparisons, measure
+thinking time too: a simulation count is not equivalent to a minimax depth.
+
+In the GUI, select **AlphaZero Policy + Search** and choose 64, 128, or 256
+simulations. Its advantage bar uses the raw AlphaZero value head, not a calibrated
+win probability or the DQN evaluator. Restart the GUI after updating a checkpoint.
+If AlphaZero weights are unavailable, the GUI explicitly switches its displayed
+opponent to minimax.
+
+Terminal play is available without Pygame, including `--raw` policy play:
+
+```powershell
+uv run play_alphazero.py --cpu --simulations 128
+```
+
+### Larger boards
+
+The new environment and search use Python-integer bitboards and dimensions from
+the checkpoint, including boards exceeding 64 bits. The network heads are sized
+from configuration. For example:
+
+```powershell
+uv run train_alphazero.py --cpu --rows 8 --cols 9 --connect 4 --channels 32 --blocks 2 --simulations 32 --output model/alpha_8x9.pth
+uv run play_alphazero.py --cpu --model model/alpha_8x9.pth
+```
+
+Changing board dimensions creates a new architecture/checkpoint; weights are not
+automatically transferable between sizes. The existing GUI, DQN, and baseline
+benchmark remain standard 6×7 Connect 4. Larger boards are supported by AlphaZero
+self-play and terminal play. Learning plus bounded search can approximate good
+decisions without solving the entire game, but does not guarantee superior play
+or perfect solutions on larger boards.
+
+AlphaZero tests additionally cover generic game rules, boards beyond 64 bits,
+value-sign handling, wins/blocks found through search, batched leaf inference,
+exploration noise, legal masks, both-player outcomes, mirrored targets, checkpoint
+reload/resume, and raw/search benchmark execution.

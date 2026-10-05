@@ -17,13 +17,24 @@ class PositionEvaluator:
     same board incorrectly gives both players the next move. Shares sum to one
     for drawing the bar; they are not empirical win probabilities.
     """
-    def __init__(self, model_path="model/connect4_model_selfplay.pth"):
+    def __init__(self, model_path=None, algorithm="dqn"):
+        if algorithm not in ("dqn", "alphazero"):
+            raise ValueError("Unknown evaluation algorithm")
+        self.algorithm = algorithm
+        model_path = model_path or ("model/connect4_alphazero.pth" if algorithm == "alphazero"
+                                    else "model/connect4_model_selfplay.pth")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         if Path(model_path).exists():
             try:
-                model = DuelingConnect4Net().to(self.device)
-                model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))
+                if algorithm == "alphazero":
+                    from alphazero import load_checkpoint
+                    model, _ = load_checkpoint(model_path, self.device)
+                    if (model.config.rows, model.config.cols, model.config.connect) != (6, 7, 4):
+                        raise ValueError("GUI evaluation requires a standard Connect 4 checkpoint")
+                else:
+                    model = DuelingConnect4Net().to(self.device)
+                    model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))
                 model.eval()
                 self.model = model
             except (OSError, RuntimeError, ValueError) as exc:
@@ -37,6 +48,16 @@ class PositionEvaluator:
         if not get_valid_locations(board):
             return 0.5, 0.5, "Draw"
         if current_turn_piece in (PLAYER_PIECE, AI_PIECE):
+            if self.algorithm == "alphazero" and self.model is not None:
+                from alphazero import Position
+                position = Position.from_board(board, current_turn_piece, self.model.config)
+                state = torch.from_numpy(position.encode()).unsqueeze(0).to(self.device)
+                with torch.no_grad():
+                    _, estimate = self.model(state)
+                value = float(estimate.item())
+                red_value = value if current_turn_piece == PLAYER_PIECE else -value
+                red = max(0.01, min(0.99, (1.0 + red_value) / 2.0))
+                return red, 1.0 - red, "AlphaZero value"
             if get_immediate_winning_move(board, current_turn_piece) is not None:
                 red = 0.999 if current_turn_piece == PLAYER_PIECE else 0.001
                 return red, 1.0 - red, "Win next move"

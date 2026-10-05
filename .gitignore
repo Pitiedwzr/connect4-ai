@@ -298,3 +298,4 @@ http-client.private.env.json
 
 # Generated training checkpoints; keep model binaries out of source commits.
 model/*.pth
+model/*.pth.tmp
