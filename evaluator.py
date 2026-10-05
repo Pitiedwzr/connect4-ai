@@ -1,111 +1,66 @@
-import os
+"""Relative positional advantage for the GUI, not calibrated win probability."""
 import math
-import numpy as np
+from pathlib import Path
+
 import torch
 
-from game import (
-    winning_move,
-    get_immediate_winning_move,
-    get_valid_locations,
-    score_position,
-    get_state_tensor,
-    PLAYER_PIECE,
-    AI_PIECE,
-)
 from agent import DuelingConnect4Net
+from game import (AI_PIECE, PLAYER_PIECE, get_candidate_moves,
+                  get_immediate_winning_move, get_state_tensor, get_valid_locations,
+                  score_position, winning_move)
 
 
-class WinRateEvaluator:
+class PositionEvaluator:
+    """Return red/yellow advantage shares and the evaluation source.
+
+    DQN inputs represent the side to move. Evaluating both perspectives on the
+    same board incorrectly gives both players the next move. Shares sum to one
+    for drawing the bar; they are not empirical win probabilities.
     """
-    Evaluates real-time win rate for Player 1 (Red) and Player 2 (Yellow).
-    Uses trained DQN model as an impartial judge if available,
-    falling back seamlessly to heuristic evaluation.
-    """
-
-    def __init__(self, model_path="model/connect4_model.pth"):
-        self.model_path = model_path
+    def __init__(self, model_path="model/connect4_model_selfplay.pth"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
-        self.use_model = False
-
-        if os.path.exists(self.model_path):
+        if Path(model_path).exists():
             try:
-                net = DuelingConnect4Net().to(self.device)
-                checkpoint = torch.load(self.model_path, map_location=self.device)
-                net.load_state_dict(checkpoint)
-                net.eval()
-                self.model = net
-                self.use_model = True
-            except Exception as e:
-                print(f"[WinRateEvaluator] Failed to load DQN model: {e}. Falling back to heuristic.")
-                self.use_model = False
-        else:
-            print(f"[WinRateEvaluator] Model file not found at {self.model_path}. Using heuristic.")
-            self.use_model = False
+                model = DuelingConnect4Net().to(self.device)
+                model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))
+                model.eval()
+                self.model = model
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(f"[PositionEvaluator] Using heuristic: {exc}")
 
     def evaluate(self, board, current_turn_piece=None):
-        """
-        Calculates win rate for Player 1 (Piece 1, Red) and Player 2 (Piece 2, Yellow).
-
-        Returns:
-            p1_win_rate (float): 0.0 to 1.0 (win probability for Player 1)
-            p2_win_rate (float): 0.0 to 1.0 (win probability for Player 2)
-            source_tag (str): "DQN 模型" or "启发式评估"
-        """
-        valid_moves = get_valid_locations(board)
-
-        # 1. Terminal State Checks
         if winning_move(board, PLAYER_PIECE):
-            return 1.0, 0.0, "终局判定"
+            return 1.0, 0.0, "Terminal"
         if winning_move(board, AI_PIECE):
-            return 0.0, 1.0, "终局判定"
-        if len(valid_moves) == 0:
-            return 0.5, 0.5, "平局判定"
-
-        # 2. Immediate Tactical Checks (1-ply win threat)
-        if current_turn_piece is not None:
+            return 0.0, 1.0, "Terminal"
+        if not get_valid_locations(board):
+            return 0.5, 0.5, "Draw"
+        if current_turn_piece in (PLAYER_PIECE, AI_PIECE):
             if get_immediate_winning_move(board, current_turn_piece) is not None:
-                if current_turn_piece == PLAYER_PIECE:
-                    return 0.999, 0.001, "即时绝杀"
-                else:
-                    return 0.001, 0.999, "即时绝杀"
-
-        # 3. DQN Model-based Evaluation
-        if self.use_model and self.model is not None:
-            try:
-                # State from Player 1's perspective
-                s1 = get_state_tensor(board, PLAYER_PIECE, AI_PIECE).to(self.device)
-                # State from Player 2's perspective
-                s2 = get_state_tensor(board, AI_PIECE, PLAYER_PIECE).to(self.device)
-
+                red = 0.999 if current_turn_piece == PLAYER_PIECE else 0.001
+                return red, 1.0 - red, "Win next move"
+            if self.model is not None:
+                candidates = get_candidate_moves(board, current_turn_piece, 3 - current_turn_piece)
+                state = get_state_tensor(board, current_turn_piece, 3 - current_turn_piece).to(self.device)
                 with torch.no_grad():
-                    q1 = self.model(s1)[0].cpu().numpy()
-                    q2 = self.model(s2)[0].cpu().numpy()
-
-                max_q1 = max(q1[c] for c in valid_moves)
-                max_q2 = max(q2[c] for c in valid_moves)
-
-                # Logistic sigmoid of Q-value difference with temperature tau
-                tau = 0.45
-                diff = max_q1 - max_q2
-                p1_rate = 1.0 / (1.0 + math.exp(-diff / tau))
-                p1_rate = max(0.01, min(0.99, p1_rate))
-                return p1_rate, 1.0 - p1_rate, "DQN 模型"
-            except Exception as e:
-                # Fallback to heuristic on unexpected inference error
-                pass
-
-        # 4. Heuristic / Positional Score Fallback
-        score_p1 = score_position(board, PLAYER_PIECE, AI_PIECE)
-        score_p2 = score_position(board, AI_PIECE, PLAYER_PIECE)
-        score_diff = score_p1 - score_p2
-
-        # Temperature scaling for heuristic score
-        temp = 14.0
-        p1_rate = 1.0 / (1.0 + math.exp(-score_diff / temp))
-        p1_rate = max(0.01, min(0.99, p1_rate))
-        return p1_rate, 1.0 - p1_rate, "启发式评估"
+                    q = self.model(state)[0].cpu().tolist()
+                value = max(q[c] for c in candidates)
+                # Old or unstable checkpoints can exceed the feasible return
+                # range. Do not turn that into misleading near-certain odds.
+                if math.isfinite(value) and -1.0 <= value <= 1.0:
+                    red_value = value if current_turn_piece == PLAYER_PIECE else -value
+                    red = max(0.01, min(0.99, (1.0 + red_value) / 2.0))
+                    return red, 1.0 - red, "DQN estimate"
+        difference = (score_position(board, PLAYER_PIECE, AI_PIECE)
+                      - score_position(board, AI_PIECE, PLAYER_PIECE))
+        red = 0.5 * (1.0 + math.tanh(difference / 28.0))
+        red = max(0.01, min(0.99, red))
+        return red, 1.0 - red, "Heuristic"
 
     def get_win_rates(self, board, current_turn_piece=None):
-        """Convenience alias for evaluate."""
+        """Compatibility alias; returned shares represent positional advantage."""
         return self.evaluate(board, current_turn_piece)
+
+
+WinRateEvaluator = PositionEvaluator

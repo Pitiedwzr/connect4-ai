@@ -1,4 +1,3 @@
-import os
 import time
 import math
 import random
@@ -9,12 +8,12 @@ import pygame
 from game import (
     get_valid_locations,
     get_immediate_winning_move,
-    get_state_tensor,
     minimax,
     PLAYER_PIECE,
     AI_PIECE,
 )
 from agent import DuelingConnect4Net
+from benchmark import network_move
 
 # Custom Pygame event for asynchronous AI move completion
 AI_MOVE_EVENT = pygame.USEREVENT + 1
@@ -31,47 +30,16 @@ class BaseAIPlayer:
 
 
 class DQNPlayer(BaseAIPlayer):
-    def __init__(self, my_piece=AI_PIECE, opp_piece=PLAYER_PIECE, model_path="model/connect4_model.pth"):
+    def __init__(self, my_piece=AI_PIECE, opp_piece=PLAYER_PIECE, model_path="model/connect4_model_selfplay.pth"):
         super().__init__(my_piece, opp_piece, name="DQN 神经网络 AI")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.net = DuelingConnect4Net().to(self.device)
-        if os.path.exists(model_path):
-            try:
-                self.net.load_state_dict(torch.load(model_path, map_location=self.device))
-                self.net.eval()
-            except Exception as e:
-                print(f"[DQNPlayer] Failed to load model from {model_path}: {e}")
-        else:
-            print(f"[DQNPlayer] Model file not found at {model_path}")
+        # A missing/incompatible checkpoint must not silently play random weights.
+        self.net.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))
+        self.net.eval()
 
     def get_move(self, board):
-        valid_moves = get_valid_locations(board)
-        if not valid_moves:
-            return None
-
-        # 1-ply tactical check: immediate win
-        win_move = get_immediate_winning_move(board, self.my_piece)
-        if win_move is not None and win_move in valid_moves:
-            return win_move
-
-        # 1-ply tactical check: immediate block
-        block_move = get_immediate_winning_move(board, self.opp_piece)
-        if block_move is not None and block_move in valid_moves:
-            return block_move
-
-        # DQN inference
-        state_tensor = get_state_tensor(board, self.my_piece, self.opp_piece).to(self.device)
-        with torch.no_grad():
-            q_values = self.net(state_tensor)[0].cpu().numpy()
-
-        max_q = -math.inf
-        best_col = valid_moves[0]
-        for c in valid_moves:
-            if q_values[c] > max_q:
-                max_q = q_values[c]
-                best_col = c
-
-        return best_col
+        return network_move(self.net, board, self.my_piece, self.opp_piece)
 
 
 class MinimaxPlayer(BaseAIPlayer):

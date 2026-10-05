@@ -1,8 +1,8 @@
 """
-Connect 4 AI - Modern Pygame GUI with Real-time Win Rate Evaluation
+Connect 4 AI - Pygame GUI with relative position advantage
 Features:
 - Crisp High-DPI Awareness & Anti-Aliased Graphics (Zero Blur)
-- Real-time win rate evaluation bar (DQN Neural Network & Heuristic Dual-Engine)
+- Relative position advantage bar (DQN estimate or heuristic)
 - Multiple opponent types: DQN, Minimax (Depth 2/4/5), Tactical Random, 2-Player Pass & Play
 - Smooth 60 FPS piece dropping physics animation
 - Asynchronous AI computation (non-blocking, zero GUI stutter)
@@ -41,7 +41,7 @@ from game import (
     PLAYER_PIECE,
     AI_PIECE,
 )
-from evaluator import WinRateEvaluator
+from evaluator import PositionEvaluator
 from ai_player import DQNPlayer, MinimaxPlayer, RandomPlayer, AsyncAIWorker, AI_MOVE_EVENT
 
 # --- Pygame Initialization ---
@@ -157,13 +157,14 @@ class Connect4GUI:
         self.ai_vs_ai = False
 
         # Evaluator & Async AI Worker
-        self.evaluator = WinRateEvaluator()
+        self.evaluator = PositionEvaluator()
         self.ai_worker = AsyncAIWorker()
+        self.ai_players = {}
 
-        # Dynamic Win Rate Smoothing (Lerp)
+        # Relative advantage smoothing (not calibrated win probabilities).
         self.display_p1_rate = 0.5
         self.target_p1_rate = 0.5
-        self.eval_source = "DQN Model"
+        self.eval_source = "Position estimate"
 
         # Animation & Hover State
         self.anim = None
@@ -173,7 +174,7 @@ class Connect4GUI:
         self.update_eval()
 
     def get_current_ai_player(self):
-        """Builds AIPlayer instance based on game configuration and turn."""
+        """Cache players so checkpoints are loaded once per seat/configuration."""
         if self.ai_vs_ai:
             current_piece = PLAYER_PIECE if self.turn == 0 else AI_PIECE
             opp_piece = AI_PIECE if self.turn == 0 else PLAYER_PIECE
@@ -185,13 +186,23 @@ class Connect4GUI:
                 current_piece = PLAYER_PIECE
                 opp_piece = AI_PIECE
 
-        if self.opponent_type == "DQN":
-            return DQNPlayer(my_piece=current_piece, opp_piece=opp_piece)
-        elif self.opponent_type == "Minimax":
-            return MinimaxPlayer(my_piece=current_piece, opp_piece=opp_piece, depth=self.minimax_depth)
-        elif self.opponent_type == "Random":
-            return RandomPlayer(my_piece=current_piece, opp_piece=opp_piece, tactical=True)
-        return None
+        key = (self.opponent_type, current_piece, self.minimax_depth)
+        if key not in self.ai_players:
+            if self.opponent_type == "DQN":
+                try:
+                    player = DQNPlayer(my_piece=current_piece, opp_piece=opp_piece)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    print(f"[GUI] DQN unavailable; using minimax: {exc}")
+                    self.opponent_type = "Minimax"
+                    return self.get_current_ai_player()
+            elif self.opponent_type == "Minimax":
+                player = MinimaxPlayer(my_piece=current_piece, opp_piece=opp_piece, depth=self.minimax_depth)
+            elif self.opponent_type == "Random":
+                player = RandomPlayer(my_piece=current_piece, opp_piece=opp_piece, tactical=True)
+            else:
+                return None
+            self.ai_players[key] = player
+        return self.ai_players[key]
 
     def is_ai_turn(self):
         if self.game_over:
@@ -209,8 +220,7 @@ class Connect4GUI:
         current_piece = PLAYER_PIECE if self.turn == 0 else AI_PIECE
         p1, p2, src = self.evaluator.evaluate(self.board, current_piece)
         self.target_p1_rate = p1
-        # Translate source label if necessary
-        self.eval_source = "DQN Neural Net" if "DQN" in src else "Heuristic Engine"
+        self.eval_source = src
 
     def reset_game(self):
         self.ai_worker.cancel()
@@ -378,7 +388,7 @@ class Connect4GUI:
         title_surf = FONT_TITLE.render("CONNECT 4 AI", True, COLOR_TEXT_MAIN)
         screen.blit(title_surf, (32, 28))
 
-        sub_surf = FONT_SUBTITLE.render("Real-time Evaluation • Deep Q-Network • Minimax Tree Search", True, COLOR_TEXT_MUTED)
+        sub_surf = FONT_SUBTITLE.render("Position advantage (0–100) • Deep Q-Network • Minimax Tree Search", True, COLOR_TEXT_MUTED)
         screen.blit(sub_surf, (32, 60))
 
         # 1. Win Rate Evaluation Bar
@@ -414,14 +424,14 @@ class Connect4GUI:
         p1_pct = int(round(self.display_p1_rate * 100))
         p2_pct = 100 - p1_pct
 
-        txt_p1 = FONT_SCORE.render(f"{p1_pct}%", True, (255, 255, 255))
+        txt_p1 = FONT_SCORE.render(f"{p1_pct}", True, (255, 255, 255))
         screen.blit(txt_p1, (RECT_EVAL_BAR.centerx - txt_p1.get_width() // 2, RECT_EVAL_BAR.top + 8))
 
-        txt_p2 = FONT_SCORE.render(f"{p2_pct}%", True, (255, 255, 255))
+        txt_p2 = FONT_SCORE.render(f"{p2_pct}", True, (255, 255, 255))
         screen.blit(txt_p2, (RECT_EVAL_BAR.centerx - txt_p2.get_width() // 2, RECT_EVAL_BAR.bottom - 24))
 
         # Bar Labels
-        label_surf = FONT_SMALL.render("EVAL", True, COLOR_TEXT_MUTED)
+        label_surf = FONT_SMALL.render("ADV", True, COLOR_TEXT_MUTED)
         screen.blit(label_surf, (RECT_EVAL_BAR.centerx - label_surf.get_width() // 2, RECT_EVAL_BAR.top - 20))
 
         src_surf = FONT_SMALL.render(self.eval_source, True, COLOR_ACCENT)

@@ -295,3 +295,6 @@ http-client.private.env.json
 /.idea/discord.xml
 
 /.claude/
+
+# Generated training checkpoints; keep model binaries out of source commits.
+model/*.pth

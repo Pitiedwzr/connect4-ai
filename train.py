@@ -1,237 +1,232 @@
+"""Train Double DQN on CPU or Accelerate-managed GPUs."""
+import argparse
+from collections import deque
+import copy
+import json
 import math
+from pathlib import Path
 import random
-import os
+
 import numpy as np
 import torch
+import torch.nn.functional as F
 from accelerate import Accelerator
 
-from agent import DQNAgent, ReplayMemory, DuelingConnect4Net
-from game import (
-    create_board, get_valid_locations, drop_piece, get_next_open_row,
-    winning_move, minimax, get_state_tensor, get_immediate_winning_move,
-    is_suicide_move
-)
+from agent import DQNAgent, ReplayMemory
+from benchmark import evaluate_network, network_move, teacher_move
+from game import (create_board, drop_piece, get_candidate_moves, get_next_open_row,
+                  get_state_tensor, get_valid_locations, winning_move)
 
-EPISODES = 50000
-BATCH_SIZE = 64
-WARMUP_STEPS = 1000
-AI_PIECE = 1
-OPPONENT_PIECE = 2
-OPPONENT_TYPE = "SelfPlay" # Random or Minimax or SelfPlay
-SELF_PLAY_UPDATE_FREQ = 300
-MINIMAX_DEPTH = [2]
-LEARN_FREQUENCY = 2
+AI_PIECE, OPPONENT_PIECE = 1, 2
 
-def get_opponent_action(board, valid_moves, opp_type, opponent_net=None, device="cpu"):
-    op_win = get_immediate_winning_move(board, OPPONENT_PIECE)
-    op_block = get_immediate_winning_move(board, AI_PIECE)
 
-    if op_win is not None:
-        return op_win
-    if op_block is not None and random.random() < 0.8:
-        return op_block
+def get_opponent_action(board, valid_moves, opp_type, opponent_net=None, device="cpu", depths=(2,)):
+    candidates = get_candidate_moves(board, OPPONENT_PIECE, AI_PIECE)
+    if len(candidates) == 1:
+        return candidates[0]
+    draw = random.random()
+    if opp_type == "SelfPlay" and opponent_net is not None and draw < 0.60:
+        return network_move(opponent_net, board, OPPONENT_PIECE, AI_PIECE)
+    if opp_type == "Minimax" or (opp_type == "SelfPlay" and draw < 0.90):
+        return teacher_move(board, OPPONENT_PIECE, AI_PIECE, random.choice(depths))
+    return random.choice(candidates)
 
-    rand_val = random.random()
 
-    if opp_type == "SelfPlay" and opponent_net is not None and rand_val < 0.70:
-        opp_state = get_state_tensor(board, OPPONENT_PIECE, AI_PIECE).to(device)
-        with torch.no_grad():
-            q_values = opponent_net(opp_state)[0].cpu().numpy()
+def pretrain_from_search(agent, positions, batch_size, depth):
+    """Optional action pretraining from search labels, not invented Q rewards.
 
-        safe_moves = [c for c in valid_moves if not is_suicide_move(board, c, OPPONENT_PIECE, AI_PIECE)]
-        candidate_moves = safe_moves if len(safe_moves) > 0 else valid_moves
+    Legal random positions cover both seats. Cross entropy teaches preferred
+    actions before sparse-reward learning. DDP ranks perform equal batch counts.
+    """
+    losses = []
+    for offset in range(0, positions, batch_size):
+        states, labels, legal_masks = [], [], []
+        for _ in range(min(batch_size, positions - offset)):
+            while True:
+                board, piece = create_board(), 1
+                terminal = False
+                for _ in range(random.randrange(25)):
+                    col = random.choice(get_valid_locations(board))
+                    drop_piece(board, get_next_open_row(board, col), col, piece)
+                    if winning_move(board, piece):
+                        terminal = True
+                        break
+                    piece = 3 - piece
+                if not terminal:
+                    break
+            state = get_state_tensor(board, piece, 3 - piece)
+            label = teacher_move(board, piece, 3 - piece, depth)
+            mask = torch.zeros(7, dtype=torch.bool)
+            mask[get_valid_locations(board)] = True
+            states.extend((state, torch.flip(state, dims=[3])))
+            labels.extend((label, 6 - label))
+            legal_masks.extend((mask, torch.flip(mask, dims=[0])))
+        agent.policy_net.train()
+        logits = agent.policy_net(torch.cat(states).to(agent.device))
+        logits = logits.masked_fill(~torch.stack(legal_masks).to(agent.device), -torch.inf)
+        loss = F.cross_entropy(logits, torch.tensor(labels, device=agent.device))
+        agent.optimizer.zero_grad()
+        agent.accelerator.backward(loss)
+        agent.accelerator.clip_grad_norm_(agent.policy_net.parameters(), 1.0)
+        agent.optimizer.step()
+        losses.append(loss.item())
+    agent.update_target_network(tau=1.0)
+    return sum(losses) / len(losses) if losses else 0.0
 
-        best_c = candidate_moves[0]
-        max_q = -math.inf
-        for c in candidate_moves:
-            if q_values[c] > max_q:
-                max_q = q_values[c]
-                best_c = c
-        return best_c
 
-    elif (opp_type == "SelfPlay" and rand_val < 0.90) or opp_type == "Minimax":
-        action, _ = minimax(
-            board, random.choice(MINIMAX_DEPTH), -math.inf, math.inf, True,
-            ai_piece=OPPONENT_PIECE, player_piece=AI_PIECE
-        )
-        return action if action in valid_moves else random.choice(valid_moves)
-
-    else: # Random
-        safe_moves = [c for c in valid_moves if not is_suicide_move(board, c, OPPONENT_PIECE, AI_PIECE)]
-        choices = safe_moves if len(safe_moves) > 0 else valid_moves
-        return random.choice(choices)
-
-def train():
-    # 1. Initialize Hugging Face Accelerator
-    accelerator = Accelerator()
-    device = accelerator.device
-
-    # Set unique seed per GPU process for diverse environment exploration
-    base_seed = 42 + accelerator.process_index
-    random.seed(base_seed)
-    np.random.seed(base_seed)
-    torch.manual_seed(base_seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(base_seed)
-
+def train(args=None):
+    if args is None:
+        args = parse_args()
+    accelerator = Accelerator(cpu=args.cpu)
+    if accelerator.device.type == "cpu":
+        torch.set_num_threads(args.cpu_threads)
+    seed = args.seed + accelerator.process_index
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     agent = DQNAgent(accelerator=accelerator)
-    agent.device = device
-    agent.policy_net = agent.policy_net.to(device)
-    agent.target_net = agent.target_net.to(device)
-
-    # 2. Prepare policy network and optimizer with Accelerator (DDP wrapper)
     agent.policy_net, agent.optimizer = accelerator.prepare(agent.policy_net, agent.optimizer)
-
-    # Helper function to update target network cleanly without DDP 'module.' prefix issues
-    def update_target_network_ddp(tau=1.0):
-        unwrapped_policy = accelerator.unwrap_model(agent.policy_net)
-        if tau == 1.0:
-            agent.target_net.load_state_dict(unwrapped_policy.state_dict())
-        else:
-            for target_param, policy_param in zip(agent.target_net.parameters(), unwrapped_policy.parameters()):
-                target_param.data.copy_(tau * policy_param.data + (1.0 - tau) * target_param.data)
-
-    agent.update_target_network = update_target_network_ddp
+    # DDP broadcasts policy parameters on prepare; synchronize each local target.
+    agent.update_target_network(tau=1.0)
+    if args.pretrain_positions:
+        loss = pretrain_from_search(agent, args.pretrain_positions, args.batch_size, args.pretrain_depth)
+        accelerator.print(f"Search pretraining: {args.pretrain_positions} positions per process, loss={loss:.4f}")
 
     memory = ReplayMemory(capacity=50000)
+    pool = deque(maxlen=args.opponent_pool_size)
 
-    # 3. Setup self-play opponent network
-    opponent_net = DuelingConnect4Net().to(device)
-    unwrapped_policy = accelerator.unwrap_model(agent.policy_net)
-    opponent_net.load_state_dict(unwrapped_policy.state_dict())
-    opponent_net.eval()
+    def snapshot():
+        net = copy.deepcopy(agent._get_unwrapped_policy())
+        net.eval()
+        net.requires_grad_(False)
+        pool.append(net)
 
-    win_count = 0
-    lose_count = 0
-    draw_count = 0
-    recent_rewards = 0.0
+    snapshot()
+    processes = accelerator.num_processes
+    # Identical loop lengths are necessary for distributed collective operations.
+    rounds = math.ceil(args.episodes / processes)
+    log_every = max(1, math.ceil(100 / processes))
+    snapshot_every = max(1, math.ceil(args.snapshot_every / processes))
+    eval_every = max(1, math.ceil(args.eval_every / processes)) if args.eval_every else 0
+    counts = np.zeros(4, dtype=np.float32)  # wins, losses, draws, summed loss
+    update_count = 0
+    accelerator.print(f"Training {rounds * processes} games on {processes} process(es), device={accelerator.device}")
 
-    # Distribute total episodes across available cards
-    num_processes = accelerator.num_processes
-    episodes_per_proc = EPISODES // num_processes
-    log_freq = max(1, 100 // num_processes)
-    self_play_freq = max(1, SELF_PLAY_UPDATE_FREQ // num_processes)
-
-    if accelerator.is_main_process:
-        print(f"Starting training across {num_processes} GPUs. Total episodes: {EPISODES} ({episodes_per_proc} per GPU)...")
-
-    for episode in range(1, episodes_per_proc + 1):
-        board = create_board()
-        game_over = False
-        turn = random.choice([0, 1]) # 50% AI goes first, 50% Opponent goes first
-        episode_reward = 0.0
-        ai_state = None
-        ai_action = None
-        episode_steps = 0
-
-        while not game_over:
-            valid_moves = get_valid_locations(board)
-            if turn == 0: # AI Turn
-                ai_state = get_state_tensor(board, AI_PIECE, OPPONENT_PIECE)
-                ai_action = agent.act(ai_state, valid_moves, board=board, my_piece=AI_PIECE, opp_piece=OPPONENT_PIECE, eval_mode=False)
-                row = get_next_open_row(board, ai_action)
-                drop_piece(board, row, ai_action, AI_PIECE)
-                episode_steps += 1
-
+    for episode in range(1, rounds + 1):
+        progress = (episode - 1) / max(1, rounds - 1)
+        max_depth = min(args.minimax_max_depth, 2 + int(progress * 3))
+        depths = tuple(range(2, max_depth + 1))
+        # Decay by global games rather than local games for multi-GPU consistency.
+        agent.epsilon = max(agent.epsilon_min, agent.epsilon_decay ** ((episode - 1) * processes))
+        teacher_probability = args.teacher_probability * (1.0 - progress)
+        opponent_net = random.choice(list(pool))
+        board, turn, state, action, steps = create_board(), random.choice([0, 1]), None, None, 0
+        done = False
+        while not done:
+            legal = get_valid_locations(board)
+            if turn == 0:
+                state = get_state_tensor(board, AI_PIECE, OPPONENT_PIECE)
+                if random.random() < teacher_probability:
+                    action = teacher_move(board, AI_PIECE, OPPONENT_PIECE, max_depth)
+                else:
+                    action = agent.act(state, legal, board, AI_PIECE, OPPONENT_PIECE)
+                drop_piece(board, get_next_open_row(board, action), action, AI_PIECE)
+                steps += 1
                 if winning_move(board, AI_PIECE):
-                    win_count += 1
-                    game_over = True
-                    memory.push_with_symmetry(ai_state, ai_action, 1.0, get_state_tensor(board.copy(), AI_PIECE, OPPONENT_PIECE), True)
-                    episode_reward += 1.0
-
-                elif len(get_valid_locations(board)) == 0:
-                    draw_count += 1
-                    game_over = True
-                    memory.push_with_symmetry(ai_state, ai_action, 0.0, get_state_tensor(board.copy(), AI_PIECE, OPPONENT_PIECE), True)
-
-            else: # Opponent Turn
-                op_action = get_opponent_action(
-                    board, valid_moves, OPPONENT_TYPE,
-                    opponent_net=opponent_net, device=agent.device
-                )
-                row = get_next_open_row(board, op_action)
-                drop_piece(board, row, op_action, OPPONENT_PIECE)
+                    counts[0] += 1
+                    done = True
+                    reward = 1.0
+                elif not get_valid_locations(board):
+                    counts[2] += 1
+                    done = True
+                    reward = 0.0
+                if done:
+                    memory.push_with_symmetry(state, action, reward,
+                                              get_state_tensor(board, AI_PIECE, OPPONENT_PIECE), True)
+            else:
+                col = get_opponent_action(board, legal, args.opponent, opponent_net,
+                                          agent.device, depths)
+                drop_piece(board, get_next_open_row(board, col), col, OPPONENT_PIECE)
                 reward = 0.0
                 if winning_move(board, OPPONENT_PIECE):
-                    reward = -1.0
-                    lose_count += 1
-                    game_over = True
-                elif len(get_valid_locations(board)) == 0:
-                    reward = 0.0
-                    draw_count += 1
-                    game_over = True
+                    counts[1] += 1
+                    done, reward = True, -1.0
+                elif not get_valid_locations(board):
+                    counts[2] += 1
+                    done = True
+                if state is not None:
+                    memory.push_with_symmetry(state, action, reward,
+                                              get_state_tensor(board, AI_PIECE, OPPONENT_PIECE), done)
+            turn = 1 - turn
 
-                # Guard: Only push transition when AI has already acted in this episode
-                if ai_state is not None:
-                    next_state = get_state_tensor(board.copy(), AI_PIECE, OPPONENT_PIECE)
-                    memory.push_with_symmetry(ai_state, ai_action, reward, next_state, game_over)
-                    episode_reward += reward
-
-            turn = (turn + 1) % 2
-
-        recent_rewards += episode_reward
-
-        # 4. Synchronized training step to prevent DDP all-reduce deadlocks
-        accelerator.wait_for_everyone()
-
-        # Check if all GPUs have enough samples to train
-        ready_flag = torch.tensor([1.0 if len(memory) >= WARMUP_STEPS else 0.0], device=device)
-        is_ready = accelerator.reduce(ready_flag, reduction="min").item() >= 1.0
-
-        # Synchronize number of gradient steps across all cards
-        steps_tensor = torch.tensor([float(episode_steps)], device=device)
+        # Accelerate supports sum/mean, not min; every rank must be ready.
+        ready = torch.tensor([float(len(memory) >= max(args.warmup_steps, args.batch_size))], device=agent.device)
+        all_ready = accelerator.reduce(ready, reduction="sum").item() == processes
+        steps_tensor = torch.tensor([float(steps)], device=agent.device)
         avg_steps = accelerator.reduce(steps_tensor, reduction="mean").item()
-        learn_steps = max(1, int(round(avg_steps / LEARN_FREQUENCY)))
-
-        if is_ready:
-            for _ in range(learn_steps):
-                agent.learn(memory, BATCH_SIZE)
+        if all_ready:
+            for _ in range(max(1, round(avg_steps / args.learn_frequency))):
+                counts[3] += agent.learn(memory, args.batch_size)
+                update_count += 1
                 agent.update_target_network(tau=0.005)
 
-            if agent.epsilon > agent.epsilon_min:
-                agent.epsilon *= agent.epsilon_decay
-
-        # Update opponent network periodically for self-play
-        if episode % self_play_freq == 0:
-            unwrapped = accelerator.unwrap_model(agent.policy_net)
-            opponent_net.load_state_dict(unwrapped.state_dict())
+        if episode % snapshot_every == 0:
+            snapshot()
+        if episode % log_every == 0 or episode == rounds:
+            metrics = accelerator.reduce(torch.tensor(counts, device=agent.device), reduction="sum").cpu().tolist()
+            updates = accelerator.reduce(torch.tensor([float(update_count)], device=agent.device), reduction="sum").item()
+            games = sum(metrics[:3])
+            accelerator.print(f"Games={episode * processes} | exploratory W/L/D={metrics[:3]} | "
+                              f"win rate={metrics[0] / max(1, games):.2%} | "
+                              f"loss={metrics[3] / max(1, updates):.4f} | epsilon={agent.epsilon:.3f}")
+            counts[:] = 0
+            update_count = 0
+        if eval_every and (episode % eval_every == 0 or episode == rounds):
+            accelerator.wait_for_everyone()
             if accelerator.is_main_process:
-                print(f">>> [Self-Play] Opponent updated to policy at Episode {episode * num_processes}.")
+                report = evaluate_network(agent._get_unwrapped_policy(), args.eval_games, args.seed + 10000)
+                print("Frozen evaluation:", json.dumps(report))
+            accelerator.wait_for_everyone()
 
-        # 5. Aggregate metrics across both GPUs and log from Rank 0
-        if episode % log_freq == 0:
-            agent.update_target_network(tau=1.0)
-
-            metrics = torch.tensor(
-                [win_count, lose_count, draw_count, recent_rewards],
-                dtype=torch.float32,
-                device=device
-            )
-            reduced_metrics = accelerator.reduce(metrics, reduction="sum")
-
-            if accelerator.is_main_process:
-                total_win = reduced_metrics[0].item()
-                total_lose = reduced_metrics[1].item()
-                total_draw = reduced_metrics[2].item()
-                total_reward = reduced_metrics[3].item()
-                total_games = total_win + total_lose + total_draw
-
-                winning_rate = total_win / total_games if total_games > 0 else 0.0
-                mean_reward = total_reward / (log_freq * num_processes)
-                global_episode = episode * num_processes
-                print(f"Episode: {global_episode}/{EPISODES} | WinRate: {winning_rate:.2%} | AvgReward: {mean_reward:.4f} | Epsilon: {agent.epsilon:.3f}")
-
-            win_count, lose_count, draw_count, recent_rewards = 0, 0, 0, 0.0
-
-    # 6. Save model on main process
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        print("Training finished!")
-        os.makedirs("model", exist_ok=True)
-        model_path = "model/connect4_model_selfplay.pth"
-        unwrapped_policy = accelerator.unwrap_model(agent.policy_net)
-        torch.save(unwrapped_policy.state_dict(), model_path)
-        print(f"Model saved to {model_path}!")
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(agent._get_unwrapped_policy().state_dict(), output)
+        print(f"Saved model to {output}")
+    return agent
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--episodes", type=int, default=50000)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--warmup-steps", type=int, default=1000)
+    parser.add_argument("--learn-frequency", type=int, default=2)
+    parser.add_argument("--cpu", action="store_true", help="Force CPU training")
+    parser.add_argument("--cpu-threads", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output", default="model/connect4_model_selfplay.pth")
+    parser.add_argument("--opponent", choices=["SelfPlay", "Minimax", "Random"], default="SelfPlay")
+    parser.add_argument("--minimax-max-depth", type=int, default=4)
+    parser.add_argument("--teacher-probability", type=float, default=0.25)
+    parser.add_argument("--pretrain-positions", type=int, default=0)
+    parser.add_argument("--pretrain-depth", type=int, default=3)
+    parser.add_argument("--opponent-pool-size", type=int, default=8)
+    parser.add_argument("--snapshot-every", type=int, default=300)
+    parser.add_argument("--eval-every", type=int, default=1000, help="Global games between frozen evaluations; 0 disables")
+    parser.add_argument("--eval-games", type=int, default=20)
+    args = parser.parse_args()
+    for name in ("episodes", "batch_size", "learn_frequency", "cpu_threads", "pretrain_depth",
+                 "opponent_pool_size", "snapshot_every", "eval_games"):
+        if getattr(args, name) < 1:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.warmup_steps < 0 or args.pretrain_positions < 0 or args.eval_every < 0:
+        parser.error("warmup steps, pretrain positions and eval interval must be nonnegative")
+    if args.minimax_max_depth < 2 or not 0 <= args.teacher_probability <= 1:
+        parser.error("minimax depth must be >=2 and teacher probability in [0,1]")
+    return args
+
 
 if __name__ == "__main__":
     train()

@@ -9,7 +9,7 @@ COL_COUNT = 7
 PLAYER_PIECE = 1
 AI_PIECE = 2
 CURRENT_AI = "DQN" # Minimax or DQN
-DQN_MODEL_PATH = "model/connect4_model.pth"
+DQN_MODEL_PATH = "model/connect4_model_selfplay.pth"
 
 # Game Logic
 def create_board():
@@ -92,33 +92,88 @@ def get_winning_coordinates(board, piece):
     return None
 
 def get_immediate_winning_move(board, piece):
-    for c in get_valid_locations(board):
-        r = get_next_open_row(board, c)
-        board[r][c] = piece
-        is_win = winning_move(board, piece)
-        board[r][c] = 0
-        if is_win:
-            return c
-    return None
+    moves = get_winning_moves(board, piece)
+    return moves[0] if moves else None
+
+
+# Seven bits per column: six playable cells and a sentinel separating columns.
+def _piece_bits(board, piece):
+    return sum(1 << (7 * c + r) for r, c in zip(*np.where(board == piece)))
+
+
+def _has_four(bits):
+    for shift in (1, 7, 6, 8):
+        pairs = bits & (bits >> shift)
+        if pairs & (pairs >> (2 * shift)):
+            return True
+    return False
+
+
+def _winning_columns(bits, heights):
+    return [c for c in (3, 2, 4, 1, 5, 0, 6)
+            if heights[c] < ROW_COUNT
+            and _has_four(bits | (1 << (7 * c + heights[c])))]
+
+
+def get_winning_moves(board, piece):
+    """All immediately winning columns, without mutating the board."""
+    heights = np.count_nonzero(board, axis=0).tolist()
+    return _winning_columns(_piece_bits(board, piece), heights)
+
+
+def get_candidate_moves(board, my_piece, opp_piece):
+    """Shared DQN policy: center opening, wins, immediate safety, fork safety.
+
+    Reject an opponent reply that creates two winning columns unless we can
+    win immediately after that reply. If every move loses, retain legal moves.
+    This bounded tactical search does not prove safety against deeper traps.
+    """
+    heights = np.count_nonzero(board, axis=0).tolist()
+    legal = [c for c in (3, 2, 4, 1, 5, 0, 6) if heights[c] < ROW_COUNT]
+    if not legal:
+        return []
+    if not any(heights):
+        return [COL_COUNT // 2]
+    mine = _piece_bits(board, my_piece)
+    theirs = _piece_bits(board, opp_piece)
+    wins = _winning_columns(mine, heights)
+    if wins:
+        return wins
+
+    safe, fork_safe = [], []
+    for c in legal:
+        after_mine = mine | (1 << (7 * c + heights[c]))
+        heights[c] += 1
+        if not _winning_columns(theirs, heights):
+            safe.append(c)
+            allows_fork = False
+            for reply in legal:
+                if heights[reply] >= ROW_COUNT:
+                    continue
+                after_theirs = theirs | (1 << (7 * reply + heights[reply]))
+                heights[reply] += 1
+                if (not _winning_columns(after_mine, heights)
+                        and len(_winning_columns(after_theirs, heights)) >= 2):
+                    allows_fork = True
+                heights[reply] -= 1
+                if allows_fork:
+                    break
+            if not allows_fork:
+                fork_safe.append(c)
+        heights[c] -= 1
+    return fork_safe or safe or legal
 
 def is_suicide_move(board, col, my_piece, opp_piece):
+    """Whether this move allows any immediate winning opponent reply."""
     row = get_next_open_row(board, col)
     if row is None:
+        return True
+    heights = np.count_nonzero(board, axis=0).tolist()
+    mine = _piece_bits(board, my_piece) | (1 << (7 * col + row))
+    if _has_four(mine):
         return False
-
-    if row + 1 >= ROW_COUNT:
-        return False
-
-    board[row][col] = my_piece
-
-    board[row + 1][col] = opp_piece
-
-    opp_wins = winning_move(board, opp_piece)
-
-    board[row + 1][col] = 0
-    board[row][col] = 0
-
-    return opp_wins
+    heights[col] += 1
+    return bool(_winning_columns(_piece_bits(board, opp_piece), heights))
 
 # Minimax
 def evaluate_window(window, piece, opp_piece=None):
@@ -183,7 +238,7 @@ def is_terminal_node(board):
     return winning_move(board, PLAYER_PIECE) or winning_move(board, AI_PIECE) or len(get_valid_locations(board)) == 0
 
 def minimax(board, depth, alpha, beta, maximizing_player, ai_piece=AI_PIECE, player_piece=PLAYER_PIECE):
-    valid_locations = get_valid_locations(board)
+    valid_locations = sorted(get_valid_locations(board), key=lambda c: abs(c - COL_COUNT // 2))
     is_terminal = winning_move(board, player_piece) or winning_move(board, ai_piece) or len(valid_locations) == 0
 
     if depth == 0 or is_terminal:
@@ -289,33 +344,12 @@ if __name__ == "__main__":
                 selection, score = minimax(board, 5, -math.inf, math.inf, True)
                 print(f'Minimax selected column {selection} with score {score}.')
             elif CURRENT_AI == "DQN":
-                # 1-ply tactical check: immediate win or block
-                win_c = get_immediate_winning_move(board, AI_PIECE)
-                block_c = get_immediate_winning_move(board, PLAYER_PIECE)
-                if win_c is not None:
-                    selection = win_c
-                    print(f'DQN selected column {selection} (immediate winning move).')
-                elif block_c is not None:
-                    selection = block_c
-                    print(f'DQN selected column {selection} (immediate blocking move).')
-                else:
-                    safe_moves = [c for c in valid_moves if not is_suicide_move(board, c, AI_PIECE, PLAYER_PIECE)]
-
-                    candidate_moves = safe_moves if len(safe_moves) > 0 else valid_moves
-
-                    state_tensor = get_state_tensor(board, AI_PIECE, PLAYER_PIECE).to(device)
-
-                    with torch.no_grad():
-                        q_value = dqn_ai(state_tensor)[0].cpu().numpy()
-
-                    max_q = -math.inf
-                    selection = candidate_moves[0]
-                    for c in candidate_moves:
-                        if q_value[c] > max_q:
-                            max_q = q_value[c]
-                            selection = c
-
-                    print(f'DQN selected column {selection} with expected reward {max_q:.3f}.')
+                candidate_moves = get_candidate_moves(board, AI_PIECE, PLAYER_PIECE)
+                state_tensor = get_state_tensor(board, AI_PIECE, PLAYER_PIECE).to(device)
+                with torch.no_grad():
+                    q_values = dqn_ai(state_tensor)[0].cpu().tolist()
+                selection = max(candidate_moves, key=lambda c: q_values[c])
+                print(f'DQN selected column {selection} with estimated return {q_values[selection]:.3f}.')
 
         if is_valid_location(board, selection):
             row = get_next_open_row(board, selection)
