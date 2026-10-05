@@ -12,7 +12,10 @@ def select_leaves(roots, children, priors, visits, sums, expanded, terminal,
     cols = tl.arange(0, BLOCK)
     node = tl.load(roots + game)
     depth = 0
-    parent = node
+    # Keep this as a distinct SSA value. Triton can lose a loop-carried variable
+    # initialized as a direct alias of another one: the compiled kernel then
+    # returns the initial root as parent even after traversing deeper nodes.
+    parent = node + 0
     action = 0
     new = False
     tl.store(paths + game * D, node)
@@ -31,7 +34,7 @@ def select_leaves(roots, children, priors, visits, sums, expanded, terminal,
         score = tl.where((cols < C) & (prior >= 0), score, -float('inf'))
         best = tl.max(score, 0)
         action = tl.min(tl.where(score == best, cols, BLOCK), 0)
-        parent = node
+        parent = node + 0
         node = tl.load(children + (game * N + parent) * C + action)
         new = node < 0
         if new:

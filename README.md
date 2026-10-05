@@ -230,7 +230,19 @@ Run the optional CUDA correctness test on the GPU host before training:
 uv run python -m unittest discover -s tests -p test_array_mcts.py -v
 ```
 
-The CUDA test is skipped when CUDA/Triton is unavailable. Then benchmark with the
+CUDA tests include per-simulation comparisons of allocation, parent/leaf indices,
+board states, visits, and value backup. They are skipped when CUDA/Triton is
+unavailable. An additional offline T4 compiler regression test checks that the
+generated traversal loop preserves the immediate parent of each leaf:
+
+```bash
+uv run python -m unittest discover -s tests -p test_search_kernels.py -v
+TRITON_INTERPRET=1 uv run python -m unittest discover -s tests -p test_search_kernels.py -v
+```
+
+The second command runs the actual kernel bodies in Triton's CPU interpreter.
+Interpreter execution cannot catch every compiler issue, so it complements the
+offline compilation and CUDA execution checks. Then benchmark with the
 same frozen network, precision, concurrent games and search budget:
 
 ```bash

@@ -265,6 +265,15 @@ class ArrayMCTS:
             if terminal is not None:
                 counts = np.zeros(self.cols, dtype=np.int32)
                 value = terminal
+            else:
+                legal = self.positions[game].legal_moves()
+                illegal = [col for col in range(self.cols) if col not in legal]
+                if counts.sum() == 0 or (counts[illegal] > 0).any():
+                    root = int(self.roots[game])
+                    actual = self.boards[game, root].cpu().numpy()
+                    matches = np.array_equal(actual, self.positions[game].encode())
+                    raise RuntimeError(f"Search invariant failed: game={game}, ply={self.positions[game].ply}, "
+                                       f"visits={counts.tolist()}, legal={legal}, root_board_matches={matches}")
             policy = counts / counts.sum() if counts.sum() else np.zeros(self.cols)
             results.append(SearchResult(policy.astype(np.float32), counts.astype(np.int64), float(value)))
         return results

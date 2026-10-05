@@ -117,6 +117,16 @@ class ArraySearchTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Nonfinite"):
             ArrayMCTS(model, [Position.empty()], simulations=4).search()
 
+    def test_corrupted_tree_rejects_visits_for_illegal_columns(self):
+        model = FixedNet()
+        position = position_after([0] * 6)
+        search = ArrayMCTS(model, [position], simulations=4)
+        search.search()
+        # Simulate a malformed expanded root allowing an already full column.
+        search.priors[0, 0, 0] = 100
+        with self.assertRaisesRegex(RuntimeError, "Search invariant failed.*root_board_matches=True"):
+            search.search()
+
     def test_training_cli_resume_preserves_backend_and_reports_timings(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix="connect4-array-") as temp:
@@ -167,6 +177,33 @@ class ArraySearchTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
 
     @unittest.skipUnless(torch.cuda.is_available() and importlib.util.find_spec("triton"), "CUDA/Triton required")
+    @torch.inference_mode()
+    def test_cuda_kernel_state_matches_reference_each_simulation(self):
+        model = FixedNet(value=0.37).cuda()
+        positions = [Position.empty(), position_after([0] * 6),
+                     position_after([0, 6, 1, 6, 2, 5]), position_after([0, 3, 0, 3, 1, 3])]
+        reference = ArrayMCTS(model, positions, simulations=32)
+        cuda = ArrayMCTS(model, positions, simulations=32, backend="cuda")
+        for search in (reference, cuda):
+            mask = search.terminal[search.ids, search.roots].isnan()
+            search._evaluate(search.roots, mask)
+        for step in range(32):
+            for search in (reference, cuda):
+                search._select()
+            for name in ("counts", "leaves", "parents", "actions", "created", "lengths"):
+                torch.testing.assert_close(getattr(reference, name), getattr(cuda, name).cpu(),
+                                           msg=f"selection {name} at simulation {step}")
+            for search in (reference, cuda):
+                search._materialize()
+                mask = ~search.expanded[search.ids, search.leaves] & search.terminal[search.ids, search.leaves].isnan()
+                predictions = search._evaluate(search.leaves, mask)
+                terminal = search.terminal[search.ids, search.leaves]
+                search._backup(torch.where(terminal.isnan(), predictions, terminal))
+            for name in ("boards", "children", "visits", "sums", "terminal"):
+                torch.testing.assert_close(getattr(reference, name), getattr(cuda, name).cpu(),
+                                           equal_nan=True, msg=f"{name} at simulation {step}")
+
+    @unittest.skipUnless(torch.cuda.is_available() and importlib.util.find_spec("triton"), "CUDA/Triton required")
     def test_cuda_kernels_match_tensor_reference_and_train(self):
         model = FixedNet().cuda()
         positions = [Position.empty(), position_after([0, 6, 1, 6, 2, 5]),
@@ -174,9 +211,10 @@ class ArraySearchTests(unittest.TestCase):
         cpu = ArrayMCTS(model, positions, simulations=128)
         cuda = ArrayMCTS(model, positions, simulations=128, backend="cuda")
         cuda_results = cuda.search()
-        for left, right in zip(cpu.search(), cuda_results):
+        for game, (left, right) in enumerate(zip(cpu.search(), cuda_results)):
             # Floating-point tie decisions may differ between CPU and GPU.
-            self.assertLessEqual(int(np.abs(left.visits - right.visits).max()), 2)
+            self.assertLessEqual(int(np.abs(left.visits - right.visits).max()), 2,
+                                 f"game={game}, cpu={left.visits.tolist()}, cuda={right.visits.tolist()}")
             self.assertAlmostEqual(left.value, right.value, delta=0.02)
         self.assertEqual([cuda_results[1].action(), cuda_results[2].action()], [3, 3])
         self.assertEqual(cuda_results[3].policy[0], 0)
