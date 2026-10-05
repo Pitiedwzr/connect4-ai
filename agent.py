@@ -38,8 +38,9 @@ class DuelingConnect4Net(nn.Module):
         return q
 
 class DQNAgent:
-    def __init__(self):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def __init__(self, accelerator=None):
+        self.accelerator = accelerator
+        self.device = accelerator.device if accelerator is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy_net = DuelingConnect4Net().to(self.device)
         self.target_net = DuelingConnect4Net().to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -50,6 +51,12 @@ class DQNAgent:
         self.epsilon_decay = 0.9999
         self.gamma = 0.99
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=0.0003)
+
+    def _get_unwrapped_policy(self):
+        """Returns the underlying model without DDP wrapper."""
+        if hasattr(self.policy_net, "module"):
+            return self.policy_net.module
+        return self.policy_net
 
     def act(self, state_tensor, valid_locations, board=None, my_piece=None, opp_piece=None, eval_mode=False):
         # 1-ply tactical check: take immediate winning move or block opponent's winning move
@@ -71,17 +78,17 @@ class DQNAgent:
                 valid_locations = safe_moves
 
         current_eps = 0.0 if eval_mode else self.epsilon
-        if random.random() < self.epsilon:
+        if random.random() < current_eps:
             # Exploration
-            action = random.choice(valid_locations)
-            return action
+            return random.choice(valid_locations)
         else:
-            # Exploitation
-            self.policy_net.eval()
+            # Exploitation: evaluate with unwrapped model in eval mode
+            unwrapped = self._get_unwrapped_policy()
+            unwrapped.eval()
             with torch.no_grad():
                 state_tensor = state_tensor.to(self.device)
-                q_values = self.policy_net(state_tensor)[0].cpu().numpy()
-            self.policy_net.train()
+                q_values = unwrapped(state_tensor)[0].cpu().numpy()
+
             best_action = valid_locations[0]
             max_q = -math.inf
             for c in valid_locations:
@@ -91,8 +98,12 @@ class DQNAgent:
             return best_action
 
     def update_target_network(self, tau=0.01):
-        for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
-            target_param.data.copy_(tau * policy_param.data + (1.0 - tau) * target_param.data)
+        unwrapped = self._get_unwrapped_policy()
+        if tau >= 1.0:
+            self.target_net.load_state_dict(unwrapped.state_dict())
+        else:
+            for target_param, policy_param in zip(self.target_net.parameters(), unwrapped.parameters()):
+                target_param.data.copy_(tau * policy_param.data + (1.0 - tau) * target_param.data)
 
     def learn(self, memory, batch_size):
         if len(memory) < batch_size:
@@ -106,23 +117,36 @@ class DQNAgent:
         rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(self.device)
         dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(self.device)
 
+        # 1. Main forward pass (train mode)
+        self.policy_net.train()
         current_q_value = self.policy_net(states).gather(1, actions)
+
+        # 2. Target Q calculation
         with torch.no_grad():
-            # next_states shape: [64, 2, 6, 7]
             invalid_move_mask = (next_states[:, 0, 5, :] != 0) | (next_states[:, 1, 5, :] != 0)
 
-            policy_next_q = self.policy_net(next_states)
+            # CRITICAL FIX: evaluate next_states using the unwrapped model in eval mode.
+            # This prevents BatchNorm from updating running_mean/var in-place!
+            unwrapped = self._get_unwrapped_policy()
+            unwrapped.eval()
+            policy_next_q = unwrapped(next_states).clone()
             policy_next_q[invalid_move_mask] = -1e9
             next_actions = policy_next_q.argmax(dim=1, keepdim=True)
 
             target_next_q = self.target_net(next_states)
             max_next_q_values = target_next_q.gather(1, next_actions)
 
-            target_q_values = rewards + (self.gamma * max_next_q_values * (1 - dones))
+            target_q_values = rewards + (self.gamma * max_next_q_values * (1.0 - dones))
 
+        # 3. Loss & Backward
         loss = F.smooth_l1_loss(current_q_value, target_q_values)
         self.optimizer.zero_grad()
-        loss.backward()
+
+        if self.accelerator is not None:
+            self.accelerator.backward(loss)
+        else:
+            loss.backward()
+
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
         self.optimizer.step()
 

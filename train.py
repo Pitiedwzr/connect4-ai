@@ -74,7 +74,7 @@ def train():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(base_seed)
 
-    agent = DQNAgent()
+    agent = DQNAgent(accelerator=accelerator)
     agent.device = device
     agent.policy_net = agent.policy_net.to(device)
     agent.target_net = agent.target_net.to(device)
