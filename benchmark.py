@@ -128,6 +128,7 @@ def main():
     parser.add_argument("--opening-plies", type=int, default=4, help="Maximum seeded opening prefix; 0 uses empty board only")
     parser.add_argument("--simulations", type=int, default=128, help="AlphaZero search budget per move")
     parser.add_argument("--c-puct", type=float, default=1.5)
+    parser.add_argument("--search-policy", choices=("puct", "gumbel"), help="Equinox only; defaults to checkpoint metadata")
     parser.add_argument("--dqn-opponent", help="Optional DQN checkpoint to include as an opponent")
     args = parser.parse_args()
     if any(d < 1 for d in args.depths):
@@ -144,7 +145,7 @@ def main():
         from connect4_jax.agent import AlphaZeroAgent
         from connect4_jax.checkpoint import DEFAULT_MODEL_PATH
         import numpy as np
-        player = AlphaZeroAgent.from_checkpoint(args.model or DEFAULT_MODEL_PATH, args.simulations, args.c_puct)
+        player = AlphaZeroAgent.from_checkpoint(args.model or DEFAULT_MODEL_PATH, args.simulations, args.c_puct, args.search_policy)
         if (player.model.config.rows, player.model.config.cols, player.model.config.connect) != (6, 7, 4):
             parser.error("The baseline benchmark requires a standard 6x7 Connect 4 checkpoint")
         net = None
@@ -153,6 +154,7 @@ def main():
         probabilities = np.exp(logits - logits.max())
         opening_policy = (probabilities / probabilities.sum()).tolist()
         report = dict(agent="equinox", mode="raw" if args.raw else "mctx", device="cpu",
+                      search_policy=player.settings.policy,
                       simulations=0 if args.raw else args.simulations, c_puct=args.c_puct,
                       opening_policy=opening_policy, opening_value=value,
                       raw_opening_column=int(np.argmax(logits)))

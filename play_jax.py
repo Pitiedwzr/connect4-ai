@@ -13,10 +13,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
     parser.add_argument("--simulations", type=int, default=128)
+    parser.add_argument("--search-policy", choices=("puct", "gumbel"), help="Defaults to checkpoint metadata")
     parser.add_argument("--ai-first", action="store_true")
     parser.add_argument("--raw", action="store_true")
     args = parser.parse_args()
-    agent = AlphaZeroAgent.from_checkpoint(args.model, args.simulations)
+    agent = AlphaZeroAgent.from_checkpoint(args.model, args.simulations, search_policy=args.search_policy)
     config = agent.model.config
     human = 2 if args.ai_first else 1
     with jax.default_device(agent.device):

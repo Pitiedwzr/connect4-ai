@@ -37,14 +37,22 @@ def main():
     for a, b in zip(jax.tree.leaves(serial.params), jax.tree.leaves(parallel.params)):
         np.testing.assert_allclose(a, b, atol=3e-6, rtol=3e-6)
     key = jax.random.PRNGKey(7)
-    trajectory = jax.device_get(parallel.collect(key))
     reference_collect = eqx.filter_jit(collect)
-    for i in range(2):
-        expected = jax.device_get(reference_collect(parallel.model, jax.random.fold_in(key, i), 2, settings))
-        for name in ("states", "policies", "outcomes", "valid"):
-            actual = getattr(trajectory, name)[:, i * 2:(i + 1) * 2]
-            np.testing.assert_array_equal(actual, getattr(expected, name))
-        np.testing.assert_array_equal(trajectory.winners[i * 2:(i + 1) * 2], expected.winners)
+    for policy, simulations, fraction in (("puct", 2, 0.0), ("gumbel", 8, 0.5)):
+        settings = SearchConfig(simulations, policy=policy)
+        runner = Runner(parallel.model, make_optimizer(), devices, settings,
+                        games_per_device=2, opening_fraction=fraction, opening_plies=4)
+        trajectory = jax.device_get(runner.collect(key))
+        for i in range(2):
+            expected = jax.device_get(reference_collect(
+                runner.model, jax.random.fold_in(key, i), 2, settings,
+                opening_fraction=fraction, opening_plies=4))
+            for name in ("states", "policies", "outcomes", "valid"):
+                actual = getattr(trajectory, name)[:, i * 2:(i + 1) * 2]
+                np.testing.assert_array_equal(actual, getattr(expected, name))
+            for name in ("winners", "opening_plies"):
+                np.testing.assert_array_equal(getattr(trajectory, name)[i * 2:(i + 1) * 2],
+                                              getattr(expected, name))
     print("Two-device gradients match the global batch; self-play matches independent RNG streams")
 
 

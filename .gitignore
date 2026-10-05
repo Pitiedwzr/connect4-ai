@@ -302,4 +302,8 @@ model/*.pth.tmp
 model/*.eqx
 model/*.eqx.tmp
 model/*.eqx.*.tmp
+model/**/*.eqx
+model/**/*.eqx.*.tmp
+model/*_evaluations/
+model/experiments/
 logs/

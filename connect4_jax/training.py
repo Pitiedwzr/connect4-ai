@@ -33,9 +33,11 @@ class Runner:
     only learner gradients are averaged. Global batch sizes are explicit.
     """
     def __init__(self, model, optimizer, devices, settings, games_per_device=64,
-                 temperature_moves=10, dtype=jnp.float32):
+                 temperature_moves=10, dtype=jnp.float32, opening_fraction=0.0, opening_plies=8):
         if not devices or games_per_device < 1 or temperature_moves < 0:
             raise ValueError("Devices/games must be positive and temperature moves nonnegative")
+        if not 0 <= opening_fraction <= 1 or opening_plies < 1 or (opening_fraction and opening_plies > model.config.rows * model.config.cols):
+            raise ValueError("Opening fraction must be in [0,1]; prefix length must fit the board")
         self.mesh = Mesh(np.asarray(devices), ("devices",))
         self.count = len(devices)
         self.games = games_per_device * self.count
@@ -49,10 +51,10 @@ class Runner:
 
         def local_collect(params, keys):
             return collect(eqx.combine(params, static), keys[0], games_per_device,
-                           settings, temperature_moves, dtype)
+                           settings, temperature_moves, dtype, opening_fraction, opening_plies)
 
         specs = Trajectory(P(None, "devices"), P(None, "devices"),
-                           P(None, "devices"), P(None, "devices"), P("devices"))
+                           P(None, "devices"), P(None, "devices"), P("devices"), P("devices"))
         self._collect = jax.jit(jax.shard_map(
             local_collect, mesh=self.mesh, in_specs=(P(), P("devices")),
             out_specs=specs, check_vma=False))

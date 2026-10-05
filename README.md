@@ -7,8 +7,14 @@ Python 3.12 or newer is required.
 
 ## Equinox + mctx training and CPU inference
 
+For the next strength experiments, see [EXPERIMENTS.md](EXPERIMENTS.md).
+It includes Gumbel search, random legal opening prefixes, reduced-learning-rate
+continuation, retained snapshots, periodic raw/search evaluation, and a separate
+64-channel capacity experiment. Existing checkpoints continue to use PUCT unless
+overridden; new checkpoints record their search policy for CPU inference.
+
 `train_jax.py` uses a residual Equinox policy/value network, Optax AdamW, and
-exact game transitions inside mctx PUCT search. Board updates, leaf inference,
+exact game transitions inside mctx PUCT or Gumbel search. Board updates, leaf inference,
 tree search, and action selection stay inside compiled JAX self-play. Each
 device collects its own games; learner gradients are averaged across devices.
 One host is supported, including eight local v5e devices or two local T4 GPUs.

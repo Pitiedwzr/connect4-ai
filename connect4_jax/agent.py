@@ -21,21 +21,23 @@ def _search(model, state, settings):
     states = jax.tree.map(lambda x: x[None], state)
     result = search(model, states, jax.random.PRNGKey(0), settings, add_noise=False)
     summary = result.search_tree.summary()
-    return result.action_weights[0], summary.visit_counts[0], summary.value[0]
+    action = result.action[0] if settings.policy == "gumbel" else jnp.argmax(summary.visit_counts[0])
+    return result.action_weights[0], summary.visit_counts[0], summary.value[0], action
 
 
 class AlphaZeroAgent:
-    def __init__(self, model, simulations=128, c_puct=1.5):
+    def __init__(self, model, simulations=128, c_puct=1.5, search_policy="puct"):
         self.device = jax.devices("cpu")[0]
         self.model = jax.device_put(model, self.device)
-        self.settings = SearchConfig(simulations=simulations, c_puct=c_puct)
+        self.settings = SearchConfig(simulations=simulations, c_puct=c_puct, policy=search_policy)
         self.last_result = None
         self._lock = threading.Lock()
 
     @classmethod
-    def from_checkpoint(cls, path=DEFAULT_MODEL_PATH, simulations=128, c_puct=1.5):
-        model, _ = load_checkpoint(path, jax.devices("cpu")[0])
-        return cls(model, simulations, c_puct)
+    def from_checkpoint(cls, path=DEFAULT_MODEL_PATH, simulations=128, c_puct=1.5, search_policy=None):
+        model, metadata = load_checkpoint(path, jax.devices("cpu")[0])
+        policy = search_policy or metadata.get("search", {}).get("policy", metadata.get("training_args", {}).get("search_policy", "puct"))
+        return cls(model, simulations, c_puct, policy)
 
     def predict(self, board, to_play):
         with jax.default_device(self.device):
@@ -61,6 +63,10 @@ class AlphaZeroAgent:
                 logits, _ = _predict(self.model, state)
                 self.last_result = None
                 return int(np.argmax(np.where(legal, np.asarray(logits), -np.inf)))
-            policy, visits, value = _search(self.model, state, self.settings)
-            self.last_result = dict(policy=np.asarray(policy), visits=np.asarray(visits), value=float(value))
-            return int(np.argmax(np.where(legal, self.last_result["visits"], -1)))
+            policy, visits, value, action = _search(self.model, state, self.settings)
+            action = int(action)
+            if not legal[action]:
+                raise RuntimeError("Search returned an illegal action")
+            self.last_result = dict(policy=np.asarray(policy), visits=np.asarray(visits), value=float(value),
+                                    action=action, search_policy=self.settings.policy)
+            return action

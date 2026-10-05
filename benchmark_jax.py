@@ -23,6 +23,9 @@ def main():
     parser.add_argument("--simulations", type=int, nargs="+", default=[32, 64, 128, 256])
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--collect", action="store_true", help="Measure full accelerator self-play instead of CPU moves")
+    parser.add_argument("--search-policy", choices=("puct", "gumbel"), help="Defaults to checkpoint policy, or puct without weights")
+    parser.add_argument("--opening-fraction", type=float, default=0.0)
+    parser.add_argument("--opening-plies", type=int, default=8)
     args = parser.parse_args()
     if args.repeats < 1 or args.games_per_device < 1 or any(n < 1 for n in args.simulations):
         parser.error("Repeats, games and simulations must be positive")
@@ -32,11 +35,17 @@ def main():
             parser.error("Requested device count is unavailable")
         devices = devices[:args.devices]
     with jax.default_device(devices[0]):
-        model = load_checkpoint(args.model, devices[0])[0] if args.model else PolicyValueNet(Config(), jax.random.PRNGKey(42))
+        metadata = {}
+        if args.model:
+            model, metadata = load_checkpoint(args.model, devices[0])
+        else:
+            model = PolicyValueNet(Config(), jax.random.PRNGKey(42))
+        policy = args.search_policy or metadata.get("search", {}).get("policy", metadata.get("training_args", {}).get("search_policy", "puct"))
         reports = []
         for simulations in args.simulations:
             if args.collect:
-                runner = Runner(model, make_optimizer(), devices, SearchConfig(simulations), args.games_per_device)
+                runner = Runner(model, make_optimizer(), devices, SearchConfig(simulations, policy=policy), args.games_per_device,
+                                opening_fraction=args.opening_fraction, opening_plies=args.opening_plies)
                 start = time.perf_counter()
                 jax.block_until_ready(runner.collect(jax.random.PRNGKey(0)))
                 warmup = time.perf_counter() - start
@@ -51,7 +60,7 @@ def main():
                                     positions_per_second=positions / sum(seconds),
                                     games_per_minute=runner.games * args.repeats * 60 / sum(seconds)))
             else:
-                agent = AlphaZeroAgent(model, simulations)
+                agent = AlphaZeroAgent(model, simulations, search_policy=policy)
                 board = np.zeros((model.config.rows, model.config.cols), np.int8)
                 start = time.perf_counter()
                 agent.warmup()
@@ -76,6 +85,7 @@ def main():
                                     p50_ms=float(np.percentile(seconds, 50) * 1000),
                                     p95_ms=float(np.percentile(seconds, 95) * 1000)))
         print(json.dumps(dict(platform=args.platform if args.collect else "cpu",
+                             search_policy=policy,
                              mode="self_play" if args.collect else "move_latency", reports=reports), indent=2))
 
 

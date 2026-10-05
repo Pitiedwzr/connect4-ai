@@ -1,4 +1,4 @@
-"""mctx PUCT with exact Connect-N transitions and alternating-player backup."""
+"""mctx PUCT/Gumbel with exact Connect-N transitions and alternating-player backup."""
 from dataclasses import dataclass
 import math
 
@@ -16,8 +16,11 @@ class SearchConfig:
     c_puct: float = 1.5
     dirichlet_alpha: float = 0.3
     noise_fraction: float = 0.25
+    policy: str = "puct"
 
     def __post_init__(self):
+        if self.policy not in ("puct", "gumbel"):
+            raise ValueError("Search policy must be puct or gumbel")
         if self.simulations < 1 or self.c_puct <= 0 or self.dirichlet_alpha <= 0:
             raise ValueError("Simulations, c-puct and Dirichlet alpha must be positive")
         if not math.isfinite(self.c_puct) or not math.isfinite(self.dirichlet_alpha):
@@ -26,11 +29,12 @@ class SearchConfig:
             raise ValueError("noise_fraction must be in [0,1]")
 
 
-def tree_memory_bytes(config, games, simulations):
+def tree_memory_bytes(config, games, simulations, policy="puct"):
     """Persistent mctx arrays, excluding NN activations and compiler temporaries."""
     state_bytes = config.rows * config.cols + 4 * config.cols + 9
     node_bytes = state_bytes + 20 + 24 * config.cols
-    return games * ((simulations + 1) * node_bytes + config.cols)
+    return games * ((simulations + 1) * node_bytes + config.cols
+                    + (4 * config.cols if policy == "gumbel" else 0))
 
 
 def masked_logits(logits, legal, done):
@@ -61,6 +65,16 @@ def search(model, states, key, settings: SearchConfig, *, add_noise=False, dtype
                              value=jnp.where(states.done, 0.0, values), embedding=states)
     # Completed batch slots need a dummy root action; never record their targets.
     invalid = ~jnp.where(states.done[:, None], jnp.ones_like(legal), legal)
+    if settings.policy == "gumbel":
+        if settings.simulations < model.config.cols:
+            raise ValueError("Gumbel search requires at least cols simulations to consider every root action")
+        return mctx.gumbel_muzero_policy(
+            model, key, root,
+            lambda params, rng, action, embedding: recurrent(params, rng, action, embedding, dtype),
+            num_simulations=settings.simulations, invalid_actions=invalid,
+            max_depth=model.config.rows * model.config.cols,
+            max_num_considered_actions=model.config.cols,
+            gumbel_scale=1.0 if add_noise else 0.0)
     return mctx.muzero_policy(
         model, key, root,
         lambda params, rng, action, embedding: recurrent(params, rng, action, embedding, dtype),
