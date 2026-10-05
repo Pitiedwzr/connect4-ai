@@ -3,8 +3,9 @@ import random
 import os
 import numpy as np
 import torch
+from accelerate import Accelerator
 
-from agent import DQNAgent, ReplayMemory
+from agent import DQNAgent, ReplayMemory, DuelingConnect4Net
 from game import (
     create_board, get_valid_locations, drop_piece, get_next_open_row,
     winning_move, minimax, get_state_tensor, get_immediate_winning_move,
@@ -61,28 +62,67 @@ def get_opponent_action(board, valid_moves, opp_type, opponent_net=None, device=
         return random.choice(choices)
 
 def train():
+    # 1. Initialize Hugging Face Accelerator
+    accelerator = Accelerator()
+    device = accelerator.device
+
+    # Set unique seed per GPU process for diverse environment exploration
+    base_seed = 42 + accelerator.process_index
+    random.seed(base_seed)
+    np.random.seed(base_seed)
+    torch.manual_seed(base_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(base_seed)
+
     agent = DQNAgent()
+    agent.device = device
+    agent.policy_net = agent.policy_net.to(device)
+    agent.target_net = agent.target_net.to(device)
+
+    # 2. Prepare policy network and optimizer with Accelerator (DDP wrapper)
+    agent.policy_net, agent.optimizer = accelerator.prepare(agent.policy_net, agent.optimizer)
+
+    # Helper function to update target network cleanly without DDP 'module.' prefix issues
+    def update_target_network_ddp(tau=1.0):
+        unwrapped_policy = accelerator.unwrap_model(agent.policy_net)
+        if tau == 1.0:
+            agent.target_net.load_state_dict(unwrapped_policy.state_dict())
+        else:
+            for target_param, policy_param in zip(agent.target_net.parameters(), unwrapped_policy.parameters()):
+                target_param.data.copy_(tau * policy_param.data + (1.0 - tau) * target_param.data)
+
+    agent.update_target_network = update_target_network_ddp
+
     memory = ReplayMemory(capacity=50000)
 
-    from agent import DuelingConnect4Net
-    opponent_net = DuelingConnect4Net().to(agent.device)
-    opponent_net.load_state_dict(agent.policy_net.state_dict())
+    # 3. Setup self-play opponent network
+    opponent_net = DuelingConnect4Net().to(device)
+    unwrapped_policy = accelerator.unwrap_model(agent.policy_net)
+    opponent_net.load_state_dict(unwrapped_policy.state_dict())
     opponent_net.eval()
 
     win_count = 0
     lose_count = 0
     draw_count = 0
-    recent_rewards = 0
-    total_steps = 0
+    recent_rewards = 0.0
 
-    print(f'Starting training on {agent.device}...')
-    for episode in range(1, EPISODES + 1):
+    # Distribute total episodes across available cards
+    num_processes = accelerator.num_processes
+    episodes_per_proc = EPISODES // num_processes
+    log_freq = max(1, 100 // num_processes)
+    self_play_freq = max(1, SELF_PLAY_UPDATE_FREQ // num_processes)
+
+    if accelerator.is_main_process:
+        print(f"Starting training across {num_processes} GPUs. Total episodes: {EPISODES} ({episodes_per_proc} per GPU)...")
+
+    for episode in range(1, episodes_per_proc + 1):
         board = create_board()
         game_over = False
         turn = random.choice([0, 1]) # 50% AI goes first, 50% Opponent goes first
-        episode_reward = 0
+        episode_reward = 0.0
         ai_state = None
         ai_action = None
+        episode_steps = 0
 
         while not game_over:
             valid_moves = get_valid_locations(board)
@@ -91,7 +131,7 @@ def train():
                 ai_action = agent.act(ai_state, valid_moves, board=board, my_piece=AI_PIECE, opp_piece=OPPONENT_PIECE, eval_mode=False)
                 row = get_next_open_row(board, ai_action)
                 drop_piece(board, row, ai_action, AI_PIECE)
-                total_steps += 1
+                episode_steps += 1
 
                 if winning_move(board, AI_PIECE):
                     win_count += 1
@@ -103,10 +143,6 @@ def train():
                     draw_count += 1
                     game_over = True
                     memory.push_with_symmetry(ai_state, ai_action, 0.0, get_state_tensor(board.copy(), AI_PIECE, OPPONENT_PIECE), True)
-
-                if len(memory) >= WARMUP_STEPS and total_steps % LEARN_FREQUENCY == 0:
-                    agent.learn(memory, BATCH_SIZE)
-                    agent.update_target_network(tau=0.005)
 
             else: # Opponent Turn
                 op_action = get_opponent_action(
@@ -131,35 +167,71 @@ def train():
                     memory.push_with_symmetry(ai_state, ai_action, reward, next_state, game_over)
                     episode_reward += reward
 
-                    if len(memory) >= WARMUP_STEPS and total_steps % LEARN_FREQUENCY == 0:
-                        agent.learn(memory, BATCH_SIZE)
-                        agent.update_target_network(tau=0.005)
-
             turn = (turn + 1) % 2
 
         recent_rewards += episode_reward
 
-        # Decay epsilon only after warmup steps
-        if len(memory) >= WARMUP_STEPS and agent.epsilon > agent.epsilon_min:
-            agent.epsilon *= agent.epsilon_decay
+        # 4. Synchronized training step to prevent DDP all-reduce deadlocks
+        accelerator.wait_for_everyone()
 
-        if episode % SELF_PLAY_UPDATE_FREQ == 0:
-            opponent_net.load_state_dict(agent.policy_net.state_dict())
-            print(f">>> [Self-Play] Opponent updated to policy at Episode {episode}.")
+        # Check if all GPUs have enough samples to train
+        ready_flag = torch.tensor([1.0 if len(memory) >= WARMUP_STEPS else 0.0], device=device)
+        is_ready = accelerator.reduce(ready_flag, reduction="min").item() >= 1.0
 
-        if episode % 100 == 0:
-            agent.update_target_network()
-            total_games = win_count + lose_count + draw_count
-            winning_rate = win_count / total_games if total_games > 0 else 0.0
-            mean_reward = recent_rewards / 100
-            print(f"Episode: {episode} | WinRate: {winning_rate:.2%} | AvgReward: {mean_reward:.4f} | Epsilon: {agent.epsilon:.3f}")
-            win_count, lose_count, draw_count, recent_rewards = 0, 0, 0, 0
+        # Synchronize number of gradient steps across all cards
+        steps_tensor = torch.tensor([float(episode_steps)], device=device)
+        avg_steps = accelerator.reduce(steps_tensor, reduction="mean").item()
+        learn_steps = max(1, int(round(avg_steps / LEARN_FREQUENCY)))
 
-    print("Training finished!")
-    os.makedirs("model", exist_ok=True)
-    model_path = "model/connect4_model_selfplay.pth"
-    torch.save(agent.policy_net.state_dict(), model_path)
-    print(f"Model saved to {model_path}!")
+        if is_ready:
+            for _ in range(learn_steps):
+                agent.learn(memory, BATCH_SIZE)
+                agent.update_target_network(tau=0.005)
+
+            if agent.epsilon > agent.epsilon_min:
+                agent.epsilon *= agent.epsilon_decay
+
+        # Update opponent network periodically for self-play
+        if episode % self_play_freq == 0:
+            unwrapped = accelerator.unwrap_model(agent.policy_net)
+            opponent_net.load_state_dict(unwrapped.state_dict())
+            if accelerator.is_main_process:
+                print(f">>> [Self-Play] Opponent updated to policy at Episode {episode * num_processes}.")
+
+        # 5. Aggregate metrics across both GPUs and log from Rank 0
+        if episode % log_freq == 0:
+            agent.update_target_network(tau=1.0)
+
+            metrics = torch.tensor(
+                [win_count, lose_count, draw_count, recent_rewards],
+                dtype=torch.float32,
+                device=device
+            )
+            reduced_metrics = accelerator.reduce(metrics, reduction="sum")
+
+            if accelerator.is_main_process:
+                total_win = reduced_metrics[0].item()
+                total_lose = reduced_metrics[1].item()
+                total_draw = reduced_metrics[2].item()
+                total_reward = reduced_metrics[3].item()
+                total_games = total_win + total_lose + total_draw
+
+                winning_rate = total_win / total_games if total_games > 0 else 0.0
+                mean_reward = total_reward / (log_freq * num_processes)
+                global_episode = episode * num_processes
+                print(f"Episode: {global_episode}/{EPISODES} | WinRate: {winning_rate:.2%} | AvgReward: {mean_reward:.4f} | Epsilon: {agent.epsilon:.3f}")
+
+            win_count, lose_count, draw_count, recent_rewards = 0, 0, 0, 0.0
+
+    # 6. Save model on main process
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        print("Training finished!")
+        os.makedirs("model", exist_ok=True)
+        model_path = "model/connect4_model_selfplay.pth"
+        unwrapped_policy = accelerator.unwrap_model(agent.policy_net)
+        torch.save(unwrapped_policy.state_dict(), model_path)
+        print(f"Model saved to {model_path}!")
 
 if __name__ == "__main__":
     train()
