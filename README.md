@@ -1,7 +1,151 @@
 # Connect 4 Agent
 
-A Double DQN agent with a dueling convolutional network, minimax opponents,
-and a Pygame interface. Python 3.12 or newer is required.
+Connect 4 agents with a Pygame interface, minimax opponents, and an Equinox/JAX
+AlphaZero training and CPU inference path using mctx. The earlier Double DQN
+and PyTorch AlphaZero implementations remain available for comparison.
+Python 3.12 or newer is required.
+
+## Equinox + mctx training and CPU inference
+
+`train_jax.py` uses a residual Equinox policy/value network, Optax AdamW, and
+exact game transitions inside mctx PUCT search. Board updates, leaf inference,
+tree search, and action selection stay inside compiled JAX self-play. Each
+device collects its own games; learner gradients are averaged across devices.
+One host is supported, including eight local v5e devices or two local T4 GPUs.
+
+The default network is 32 channels with two residual blocks and GroupNorm.
+`--channels 64 --blocks 4` reproduces the legacy AlphaZero architecture.
+Both seats produce examples in their own perspective; final win/loss/draw
+targets are +1/-1/0. Nonterminal search edges use discount -1 to reverse player
+perspective; winning edges reward the acting player +1 and terminate backup.
+Only exact rules and legal actions guide search. No minimax teacher, forced
+opening, or tactical filter is used.
+
+The dependency versions tested locally are locked in `uv.lock`. CPU installation
+works on Windows and Linux:
+
+```powershell
+uv sync --locked
+uv run train_jax.py --cpu --iterations 10 --games-per-device 2 --simulations 16 --batch-size 32 --warmup-positions 128 --updates-per-iteration 4 --output model/connect4_alphazero.eqx --export model/connect4_alphazero_inference.eqx --log logs/jax_cpu.jsonl
+```
+
+These are experiment settings, not a promise of trained playing strength.
+The first collection and first learner update include compilation; the JSONL
+marks those phases separately. `--batch-size` is global, while
+`--games-per-device` is local. Batch size must divide evenly across devices.
+Self-play outcome counts are not evidence of improvement against opponents.
+On CPU hosts with limited memory, setting `OPENBLAS_NUM_THREADS=1` and
+`OMP_NUM_THREADS=1` before launching Python bounds auxiliary numerical thread
+pools, especially when running the test suite's subprocess checks.
+
+### v5e-8 and T4 x 2
+
+Accelerator extras require Linux. Select exactly one extra. JAX CUDA 12 requires
+a Linux NVIDIA driver >=525; CUDA 13 requires >=580. The T4 supports either
+family when its driver is compatible. Check the installed runtime before training:
+
+```bash
+# TPU runtime with eight local devices
+uv sync --locked --extra tpu
+uv run python -c "import jax; print(jax.local_devices())"
+uv run train_jax.py --platform tpu --devices 8 --games-per-device 64 --simulations 64 --batch-size 1024 --precision bf16 --iterations 1000 --output model/connect4_alphazero.eqx --export model/connect4_alphazero_inference.eqx --log logs/jax_tpu.jsonl
+
+# Two T4 GPUs; use cuda13 instead if the host driver requires that profile
+uv sync --locked --extra cuda12
+uv run python -c "import jax; print(jax.local_devices())"
+uv run train_jax.py --platform gpu --devices 2 --games-per-device 32 --simulations 64 --batch-size 512 --precision fp32 --iterations 1000 --output model/connect4_alphazero.eqx --export model/connect4_alphazero_inference.eqx --log logs/jax_t4.jsonl
+```
+
+Before a long accelerator run, execute a two-iteration smoke run with the same
+platform/device options, `--games-per-device 2 --simulations 4 --batch-size 32
+--warmup-positions 32 --updates-per-iteration 1`, and a separate output path.
+Verify that its exported checkpoint loads with CPU inference. Local CPU checks
+validate sharding semantics but do not establish accelerator compatibility or speed.
+
+FP32 is the T4 baseline. BF16 convolution compute is available on TPU; master
+parameters, GroupNorm, dense heads, losses, optimizer state, and search statistics
+remain FP32. FP16 training is deferred until loss scaling is implemented and
+validated. Compare FP32 and BF16 training on the TPU before choosing precision.
+
+`--search-memory-mb` defaults to 512 MiB per device and checks persistent mctx
+tree arrays before collection. Neural activations and compiler temporaries are
+additional. Trees are rebuilt each move, so their capacity is simulations + 1;
+there is currently no subtree reuse or transposition cache. The earlier cached
+Python implementation may therefore remain competitive for small CPU searches.
+
+Replay uses a bounded host ring buffer. Horizontal reflection is applied when
+sampling, including reflection of policy columns. Weights remain fixed during
+each collection phase, and gradients do not pass through MCTS.
+
+### Checkpoints, resume, and migration
+
+The `.eqx` files are versioned ZIP bundles containing JSON architecture metadata
+and Equinox model leaves. Training bundles also contain optimizer leaves, replay,
+RNG streams, and counters. Writes atomically replace complete checkpoints;
+inference loading reads only metadata and model weights and needs no PyTorch.
+
+```powershell
+uv run train_jax.py --cpu --resume model/connect4_alphazero.eqx --iterations 10
+uv run train_jax.py --cpu --init-from model/connect4_alphazero_inference.eqx --iterations 10
+uv run convert_checkpoint_jax.py model/legacy_alphazero.pth model/imported_alphazero.eqx
+```
+
+Resume restores saved training options unless explicitly overridden, and
+`--iterations` means additional iterations. Preserve device count, platform,
+replay capacity, and all training settings for exact continuation. Changing
+settings intentionally changes the experiment. For a new hardware configuration,
+use `--init-from` to retain weights and start fresh optimizer/replay/RNG streams.
+Loading existing weights fixes board and network dimensions. Legacy conversion
+checks forward-output agreement before saving; legacy optimizer and replay are
+not converted. DQN checkpoints cannot be converted to policy/value models.
+
+### CPU play and evaluation
+
+```powershell
+uv run play_jax.py --model model/connect4_alphazero_inference.eqx --simulations 128
+uv run play_jax.py --model model/connect4_alphazero_inference.eqx --raw
+uv run benchmark.py --agent equinox --model model/connect4_alphazero_inference.eqx --games 50 --simulations 128
+uv run benchmark.py --agent equinox --model model/connect4_alphazero_inference.eqx --games 50 --raw
+uv run benchmark_jax.py --model model/connect4_alphazero_inference.eqx --simulations 32 64 128 256 --repeats 30
+```
+
+The Equinox agent always places its model and search on CPU. Evaluation disables
+root noise and chooses the most visited legal move. Raw mode chooses legal policy
+logits directly. `benchmark_jax.py` reports warmup separately from p50/p95 move
+latency on seeded legal opening prefixes. Compare playing strength at equal
+thinking time, since simulation counts are not equivalent across implementations.
+The baseline opponent benchmark still uses standard 6x7 Connect 4; training and
+terminal play support larger boards.
+
+The GUI's existing **AlphaZero Policy + Search** choice prefers
+`model/connect4_alphazero.eqx` when present, and otherwise uses the legacy `.pth`
+checkpoint. Both the player and advantage bar support Equinox weights. The first
+search compiles in the existing background AI worker. The bar remains a position
+estimate rather than calibrated win odds. Restart after replacing weights.
+
+To compare accelerator collection throughput without training:
+
+```bash
+uv run benchmark_jax.py --collect --platform tpu --devices 8 --games-per-device 64 --simulations 64 128 --repeats 3
+uv run benchmark_jax.py --collect --platform gpu --devices 2 --games-per-device 32 --simulations 64 128 --repeats 3
+```
+
+Without `--model`, these benchmarks use randomly initialized 32-channel/two-block
+weights. Throughput excludes one warmup collection, but host result transfer is
+included. Hardware selection should follow measured throughput and playing
+strength gained per hour, rather than peak accelerator compute.
+
+```powershell
+$env:OPENBLAS_NUM_THREADS = '1'
+$env:OMP_NUM_THREADS = '1'
+uv run python -m unittest discover -s tests -v
+```
+
+The new tests cover reference rule parity (including boards exceeding 64 cells),
+terminal rewards and value signs, mctx wins/blocks and descendant legality,
+tree-memory accounting, reflection, training, checkpoint portability, exact CPU
+resume, legacy weight conversion, GUI/benchmark integration, and gradient averaging
+on two simulated CPU devices. Existing implementation tests remain in the suite.
 
 ## Setup and play
 

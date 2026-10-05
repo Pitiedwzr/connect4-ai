@@ -2,6 +2,7 @@ import time
 import math
 import random
 import threading
+from pathlib import Path
 import torch
 import pygame
 
@@ -45,8 +46,16 @@ class DQNPlayer(BaseAIPlayer):
 
 class AlphaZeroPlayer(BaseAIPlayer):
     def __init__(self, my_piece=AI_PIECE, opp_piece=PLAYER_PIECE,
-                 model_path=DEFAULT_MODEL_PATH, simulations=128):
+                 model_path=None, simulations=128):
         super().__init__(my_piece, opp_piece, name=f"AlphaZero ({simulations} simulations)")
+        eqx_path = "model/connect4_alphazero.eqx"
+        model_path = model_path or (eqx_path if Path(eqx_path).exists() else DEFAULT_MODEL_PATH)
+        if str(model_path).endswith(".eqx"):
+            from connect4_jax.agent import AlphaZeroAgent as EquinoxAgent
+            self.agent = EquinoxAgent.from_checkpoint(model_path, simulations)
+            if (self.agent.model.config.rows, self.agent.model.config.cols, self.agent.model.config.connect) != (6, 7, 4):
+                raise ValueError("The GUI uses a standard 6x7 Connect 4 checkpoint")
+            return
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model, _ = load_checkpoint(model_path, device)
         if (model.config.rows, model.config.cols, model.config.connect) != (6, 7, 4):

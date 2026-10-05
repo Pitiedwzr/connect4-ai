@@ -21,13 +21,23 @@ class PositionEvaluator:
         if algorithm not in ("dqn", "alphazero"):
             raise ValueError("Unknown evaluation algorithm")
         self.algorithm = algorithm
-        model_path = model_path or ("model/connect4_alphazero.pth" if algorithm == "alphazero"
+        self.equinox_agent = None
+        eqx_path = "model/connect4_alphazero.eqx"
+        model_path = model_path or ((eqx_path if Path(eqx_path).exists() else "model/connect4_alphazero.pth") if algorithm == "alphazero"
                                     else "model/connect4_model_selfplay.pth")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         if Path(model_path).exists():
             try:
                 if algorithm == "alphazero":
+                    if str(model_path).endswith(".eqx"):
+                        from connect4_jax.agent import AlphaZeroAgent
+                        self.equinox_agent = AlphaZeroAgent.from_checkpoint(model_path)
+                        config = self.equinox_agent.model.config
+                        if (config.rows, config.cols, config.connect) != (6, 7, 4):
+                            self.equinox_agent = None
+                            raise ValueError("GUI evaluation requires a standard Connect 4 checkpoint")
+                        return
                     from alphazero import load_checkpoint
                     model, _ = load_checkpoint(model_path, self.device)
                     if (model.config.rows, model.config.cols, model.config.connect) != (6, 7, 4):
@@ -48,6 +58,12 @@ class PositionEvaluator:
         if not get_valid_locations(board):
             return 0.5, 0.5, "Draw"
         if current_turn_piece in (PLAYER_PIECE, AI_PIECE):
+            if self.equinox_agent is not None:
+                _, value = self.equinox_agent.predict(board, current_turn_piece)
+                if math.isfinite(value) and -1.0 <= value <= 1.0:
+                    red_value = value if current_turn_piece == PLAYER_PIECE else -value
+                    red = max(0.01, min(0.99, (1.0 + red_value) / 2.0))
+                    return red, 1.0 - red, "AlphaZero value (Equinox)"
             if self.algorithm == "alphazero" and self.model is not None:
                 from alphazero import Position
                 position = Position.from_board(board, current_turn_piece, self.model.config)

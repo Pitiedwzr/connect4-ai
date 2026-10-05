@@ -52,8 +52,11 @@ def evaluate_network(net, games=20, seed=12345, depths=(2, 4), raw=False, openin
         raise ValueError("games must be positive (games per seat per opponent)")
     if not 0 <= opening_plies <= 12 or any(depth < 1 for depth in depths):
         raise ValueError("opening_plies must be in [0,12] and depths must be positive")
-    rng_state, was_training = random.getstate(), net.training
-    net.eval()
+    if net is None and move_fn is None:
+        raise ValueError("A network or move function is required")
+    rng_state, was_training = random.getstate(), net.training if net is not None else None
+    if net is not None:
+        net.eval()
     results = {}
     extra_opponents = extra_opponents or {}
     try:
@@ -108,13 +111,14 @@ def evaluate_network(net, games=20, seed=12345, depths=(2, 4), raw=False, openin
                 results[opponent]["first" if seat == 1 else "second"] = counts
     finally:
         random.setstate(rng_state)
-        net.train(was_training)
+        if net is not None:
+            net.train(was_training)
     return results
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--agent", choices=("dqn", "alphazero"), default="dqn")
+    parser.add_argument("--agent", choices=("dqn", "alphazero", "equinox"), default="dqn")
     parser.add_argument("--model", help="Checkpoint path; defaults to the selected agent's checkpoint")
     parser.add_argument("--games", type=int, default=20, help="Games per seat per opponent")
     parser.add_argument("--seed", type=int, default=12345)
@@ -136,7 +140,23 @@ def main():
     if device.type == "cpu":
         torch.set_num_threads(1)
     move_fn = None
-    if args.agent == "alphazero":
+    if args.agent == "equinox":
+        from connect4_jax.agent import AlphaZeroAgent
+        from connect4_jax.checkpoint import DEFAULT_MODEL_PATH
+        import numpy as np
+        player = AlphaZeroAgent.from_checkpoint(args.model or DEFAULT_MODEL_PATH, args.simulations, args.c_puct)
+        if (player.model.config.rows, player.model.config.cols, player.model.config.connect) != (6, 7, 4):
+            parser.error("The baseline benchmark requires a standard 6x7 Connect 4 checkpoint")
+        net = None
+        move_fn = lambda board, my, other: player.get_move(board, my, other, raw=args.raw)
+        logits, value = player.predict(np.zeros((6, 7), np.int8), 1)
+        probabilities = np.exp(logits - logits.max())
+        opening_policy = (probabilities / probabilities.sum()).tolist()
+        report = dict(agent="equinox", mode="raw" if args.raw else "mctx", device="cpu",
+                      simulations=0 if args.raw else args.simulations, c_puct=args.c_puct,
+                      opening_policy=opening_policy, opening_value=value,
+                      raw_opening_column=int(np.argmax(logits)))
+    elif args.agent == "alphazero":
         from alphazero import AlphaZeroAgent, DEFAULT_MODEL_PATH, Position, load_checkpoint
         net, _ = load_checkpoint(args.model or DEFAULT_MODEL_PATH, device)
         if (net.config.rows, net.config.cols, net.config.connect) != (6, 7, 4):
