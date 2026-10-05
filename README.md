@@ -193,13 +193,79 @@ Without an explicit `--output`, resume saves back to its input checkpoint.
 Accelerate can distribute independent self-play groups and synchronize training:
 
 ```powershell
-uv run accelerate launch --num_processes 2 train_alphazero.py --iterations 1000
+uv run accelerate launch --multi_gpu --num_processes 2 train_alphazero.py --iterations 1000
 ```
 
 Games per iteration and replay capacity are per process; reported games are global.
 Distributed resume restores weights and optimizer but starts fresh local replay
 and RNG streams; it does not claim bit-for-bit continuation across ranks. CUDA and
 multi-process execution require validation on the target hardware.
+
+### Experimental accelerated search
+
+`--search-backend python` remains the default and uses the original cached search.
+`--search-backend cpu` is a tensor-array reference implementation, useful for
+correctness comparisons; it is not a compiled CPU speed optimization.
+`--search-backend cuda` keeps boards, tree statistics, leaf selection and backup
+on the GPU. It requires CUDA PyTorch and Triton on Linux (including Kaggle).
+Triton is loaded only when this backend is requested; CPU/Windows users do not
+need an additional dependency.
+
+The array backends allocate children lazily and retain each game's tree between
+moves. GPU selection and backup use fused Triton kernels. Board transitions,
+Connect-N detection and policy/value inference use batched device operations.
+No prediction is returned to Python within a search simulation. Action selection,
+exploration noise and replay generation still run on the CPU once per real move.
+The network architecture and existing checkpoints are unchanged.
+
+These backends use fixed inference batches, including masked completed games and
+terminal leaves, and do not use the Python backend's transposition cache. This
+avoids per-simulation host synchronization but can evaluate redundant positions.
+Kernel launch overhead and the small network may still limit throughput. Compare
+end-to-end speed before selecting CUDA search; a speedup is not guaranteed.
+
+Run the optional CUDA correctness test on the GPU host before training:
+
+```bash
+uv run python -m unittest discover -s tests -p test_array_mcts.py -v
+```
+
+The CUDA test is skipped when CUDA/Triton is unavailable. Then benchmark with the
+same frozen network, precision, concurrent games and search budget:
+
+```bash
+uv run benchmark_search.py --backends python cuda --games 32 --simulations 128 --mixed-precision fp16
+uv run benchmark_search.py --backends python cuda --games 64 --simulations 128 --mixed-precision fp16
+uv run benchmark_search.py --backends python cuda --games 128 --simulations 128 --mixed-precision fp16
+```
+
+Add `--model model/connect4_alphazero.pth` to compare your trained network.
+The benchmark excludes warmup/JIT compilation and reports games per minute,
+positions per second, durations and peak allocated CUDA memory. Different backends
+can generate different games because of RNG consumption and floating-point ties;
+position counts are reported to help interpret their throughput.
+
+For training on one T4, if the CUDA tests pass and throughput improves:
+
+```bash
+uv run accelerate launch --num_processes 1 --mixed_precision fp16 train_alphazero.py --search-backend cuda --games-per-iteration 64 --simulations 128 --batch-size 256 --warmup-positions 4096 --replay-capacity 100000 --iterations 100 --log logs/alpha_cuda.jsonl
+```
+
+Resume an existing model with `--resume` and explicitly select the new backend.
+Backend/memory options are stored in checkpoints and restored unless overridden.
+`--max-tree-nodes` sets capacity per game; zero reserves enough nodes for a full
+game at the requested simulation budget. An insufficient limit fails explicitly.
+`--search-memory-mb` defaults to 512 MiB per process and bounds persistent tree
+arrays; neural-network activations, temporary tensors and replay are additional.
+The startup allocation fails with a memory estimate if that budget is exceeded.
+
+Training JSONL now includes local collection/training durations and local games
+per minute. Add `--profile-search` for detailed traversal, expansion, inference,
+transfer and backup timings plus inference batch statistics. CUDA profiling
+synchronizes at phase boundaries and slows collection; disable it for throughput
+comparisons. Distributed phase timings describe rank zero, while game outcomes
+and losses remain aggregated across ranks. CUDA kernels require validation on
+your target GPU; local CPU tests do not establish their correctness or speed.
 
 ### Compare policy and search
 

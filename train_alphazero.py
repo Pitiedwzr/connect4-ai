@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 from alphazero import (AlphaZeroConfig, AlphaZeroNet, DEFAULT_MODEL_PATH, MCTS,
                        Position, load_checkpoint, save_checkpoint)
+from array_mcts import ArrayMCTS, SearchProfile
 
 
 class SelfPlayReplay:
@@ -53,7 +54,9 @@ class SelfPlayReplay:
 
 
 def self_play_games(model, games=8, simulations=64, temperature_moves=10,
-                    c_puct=1.5, dirichlet_alpha=0.3, noise_fraction=0.25, rng=None):
+                    c_puct=1.5, dirichlet_alpha=0.3, noise_fraction=0.25, rng=None,
+                    search_backend="python", max_tree_nodes=0, search_memory_mb=512,
+                    profile_search=False):
     """Batch one leaf per active game at each search simulation.
 
     Model weights stay frozen for the entire collection. Both seats contribute
@@ -64,9 +67,15 @@ def self_play_games(model, games=8, simulations=64, temperature_moves=10,
     rng = rng or np.random.default_rng()
     model.eval()
     positions = [Position.empty(model.config) for _ in range(games)]
+    if search_backend != "python":
+        return array_self_play(model, positions, simulations, temperature_moves, c_puct,
+                               dirichlet_alpha, noise_fraction, rng, search_backend,
+                               max_tree_nodes, search_memory_mb, profile_search)
+    profile = SearchProfile(next(model.parameters()).device, profile_search)
     searches = [MCTS(model, simulations, c_puct,
                      rng=np.random.default_rng(int(rng.integers(2**32))),
-                     dirichlet_alpha=dirichlet_alpha, noise_fraction=noise_fraction)
+                     dirichlet_alpha=dirichlet_alpha, noise_fraction=noise_fraction,
+                     profile=profile)
                 for _ in range(games)]
     histories = [[] for _ in range(games)]
     active = list(range(games))
@@ -90,10 +99,44 @@ def self_play_games(model, games=8, simulations=64, temperature_moves=10,
             outcome = (0.0 if not position.winner else
                        1.0 if position.winner == side else -1.0)
             examples.append((state, policy, outcome))
-    return examples, dict(first_wins=sum(p.winner == 1 for p in positions),
+    metrics = dict(first_wins=sum(p.winner == 1 for p in positions),
                           second_wins=sum(p.winner == 2 for p in positions),
                           draws=sum(p.winner == 0 for p in positions),
                           positions=len(examples))
+    if profile_search:
+        metrics["search_profile"] = profile.report()
+    return examples, metrics
+
+
+def array_self_play(model, positions, simulations, temperature_moves, c_puct,
+                    alpha, noise_fraction, rng, backend, max_nodes, memory_mb, profile):
+    search = ArrayMCTS(model, positions, simulations, c_puct, alpha, noise_fraction,
+                       rng, backend, max_nodes, memory_mb, profile)
+    histories = [[] for _ in positions]
+    for _ in range(model.config.rows * model.config.cols):
+        if all(p.terminal_value() is not None for p in search.positions):
+            break
+        results = search.search(add_noise=True)
+        actions = []
+        for game, (position, result) in enumerate(zip(search.positions, results)):
+            if position.terminal_value() is not None:
+                actions.append(None)
+                continue
+            histories[game].append((position.encode(), result.policy.copy(), position.to_play))
+            actions.append(result.action(rng, 1.0 if position.ply < temperature_moves else 0.0))
+        search.advance(actions)
+    examples = []
+    for position, history in zip(search.positions, histories):
+        for state, policy, side in history:
+            outcome = 0.0 if not position.winner else 1.0 if side == position.winner else -1.0
+            examples.append((state, policy, outcome))
+    metrics = dict(first_wins=sum(p.winner == 1 for p in search.positions),
+                   second_wins=sum(p.winner == 2 for p in search.positions),
+                   draws=sum(p.winner == 0 for p in search.positions), positions=len(examples),
+                   search_memory_mib=round(search.memory_bytes / 1024**2, 2))
+    if profile:
+        metrics["search_profile"] = search.profile.report()
+    return examples, metrics
 
 
 def policy_value_loss(logits, values, states, target_policies, target_outcomes):
@@ -127,7 +170,8 @@ def train(args):
         saved_args = restored.get("training_args", {})
         for name in ("games_per_iteration", "simulations", "batch_size", "updates_per_iteration",
                      "warmup_positions", "replay_capacity", "learning_rate", "weight_decay",
-                     "temperature_moves", "c_puct", "dirichlet_alpha", "noise_fraction", "seed", "cpu_threads"):
+                     "temperature_moves", "c_puct", "dirichlet_alpha", "noise_fraction", "seed", "cpu_threads",
+                     "search_backend", "max_tree_nodes", "search_memory_mb", "profile_search"):
             if name not in explicit and name in saved_args:
                 setattr(args, name, saved_args[name])
         if args.replay_capacity < max(args.batch_size, args.warmup_positions):
@@ -164,6 +208,8 @@ def train(args):
             group["weight_decay"] = args.weight_decay
     model, optimizer = accelerator.prepare(model, optimizer)
     net = accelerator.unwrap_model(model)
+    if args.search_backend == "cuda" and accelerator.device.type != "cuda":
+        raise ValueError("--search-backend cuda requires CUDA; omit --cpu")
     accelerator.print(f"AlphaZero self-play on {accelerator.device}, {accelerator.num_processes} process(es), "
                       f"config={asdict(config)}, simulations={args.simulations}")
     if args.resume and accelerator.num_processes > 1:
@@ -184,9 +230,12 @@ def train(args):
         accelerator.wait_for_everyone()
 
     for iteration in range(start_iteration + 1, start_iteration + args.iterations + 1):
+        iteration_start = time.monotonic()
         examples, game_metrics = self_play_games(
             net, args.games_per_iteration, args.simulations, args.temperature_moves,
-            args.c_puct, args.dirichlet_alpha, args.noise_fraction, rng)
+            args.c_puct, args.dirichlet_alpha, args.noise_fraction, rng,
+            args.search_backend, args.max_tree_nodes, args.search_memory_mb, args.profile_search)
+        collection_seconds = time.monotonic() - iteration_start
         replay.add(examples)
         games_played += args.games_per_iteration * accelerator.num_processes
         ready = torch.tensor([float(len(replay) >= max(args.batch_size, args.warmup_positions))],
@@ -194,6 +243,7 @@ def train(args):
         all_ready = accelerator.reduce(ready, reduction="sum").item() == accelerator.num_processes
         losses = np.zeros(3, dtype=np.float64)
         updates = 0
+        training_start = time.monotonic()
         if all_ready:
             for _ in range(args.updates_per_iteration):
                 states, policies, outcomes = replay.sample(args.batch_size, rng)
@@ -220,6 +270,14 @@ def train(args):
                       policy_loss=metrics[5] / max(1, metrics[7]),
                       value_loss=metrics[6] / max(1, metrics[7]), updates=int(metrics[7]),
                       replay_positions=len(replay), elapsed_seconds=round(time.monotonic() - start_time, 2))
+        record.update(search_backend=args.search_backend,
+                      collection_seconds=round(collection_seconds, 4),
+                      training_seconds=round(time.monotonic() - training_start, 4),
+                      local_games_per_minute=round(args.games_per_iteration * 60 / max(collection_seconds, 1e-9), 2))
+        # Search timings are rank zero's local workload; outcomes/losses above are global.
+        for name in ("search_profile", "search_memory_mib"):
+            if name in game_metrics:
+                record[name] = game_metrics[name]
         accelerator.print(json.dumps(record))
         if args.log and accelerator.is_main_process:
             log = Path(args.log)
@@ -254,6 +312,11 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cpu", action="store_true")
     parser.add_argument("--cpu-threads", type=int, default=1)
+    parser.add_argument("--search-backend", choices=("python", "cpu", "cuda"), default="python",
+                        help="Reference Python, tensor CPU reference, or experimental Triton CUDA search")
+    parser.add_argument("--max-tree-nodes", type=int, default=0, help="Nodes per game; 0 reserves a full self-play game")
+    parser.add_argument("--search-memory-mb", type=float, default=512, help="Persistent search-array memory budget per process")
+    parser.add_argument("--profile-search", action="store_true", help="Detailed phase timings; synchronizes CUDA and slows collection")
     parser.add_argument("--output", default=DEFAULT_MODEL_PATH)
     parser.add_argument("--resume", help="AlphaZero checkpoint; its network/game configuration is reused")
     parser.add_argument("--checkpoint-every", type=int, default=10)
@@ -267,6 +330,8 @@ def parse_args():
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.temperature_moves < 0 or args.warmup_positions < 0:
         parser.error("temperature moves and warmup positions must be nonnegative")
+    if args.max_tree_nodes < 0 or args.search_memory_mb <= 0:
+        parser.error("Tree node limit must be nonnegative and search memory budget positive")
     if args.replay_capacity < max(args.batch_size, args.warmup_positions):
         parser.error("replay capacity must accommodate batch size and warmup positions")
     if args.learning_rate <= 0 or args.weight_decay < 0 or args.c_puct <= 0 or args.dirichlet_alpha <= 0:

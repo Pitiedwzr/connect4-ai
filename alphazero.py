@@ -4,6 +4,7 @@ Only legal moves and exact terminal outcomes enter the search. There are no
 opening rules, tactical shields, heuristic scores, or minimax teacher labels.
 """
 from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 import math
 from pathlib import Path
@@ -206,7 +207,7 @@ class SearchResult:
 
 class MCTS:
     def __init__(self, model, simulations=128, c_puct=1.5, rng=None,
-                 dirichlet_alpha=0.3, noise_fraction=0.25, cache_size=10000):
+                 dirichlet_alpha=0.3, noise_fraction=0.25, cache_size=10000, profile=None):
         if simulations < 1 or c_puct <= 0 or dirichlet_alpha <= 0:
             raise ValueError("Simulations, c_puct and Dirichlet alpha must be positive")
         if not 0 <= noise_fraction <= 1 or cache_size < 1:
@@ -220,6 +221,10 @@ class MCTS:
         self.cache_size = cache_size
         self.cache = OrderedDict()
         self.root = None
+        self.profile = profile
+
+    def _phase(self, name):
+        return self.profile.phase(name) if self.profile is not None else nullcontext()
 
     def reset(self):
         self.root = None
@@ -259,17 +264,25 @@ class MCTS:
             if node.position in search.cache:
                 priors, value = search.cache[node.position]
                 search.cache.move_to_end(node.position)
-                MCTS._install_children(node, priors)
+                with search._phase("expansion"):
+                    MCTS._install_children(node, priors)
                 values[index] = value
             else:
                 missing.append(index)
         if missing:
-            device = next(model.parameters()).device
-            states = np.stack([pairs[index][1].position.encode() for index in missing])
-            with torch.inference_mode():
-                logits, predictions = model(torch.from_numpy(states).to(device))
-            logits = logits.detach().float().cpu().numpy()
-            predictions = predictions.detach().float().cpu().numpy().reshape(-1)
+            first = pairs[0][0]
+            with first._phase("encoding"):
+                device = next(model.parameters()).device
+                states = np.stack([pairs[index][1].position.encode() for index in missing])
+            with first._phase("inference"):
+                with torch.inference_mode():
+                    logits, predictions = model(torch.from_numpy(states).to(device))
+            with first._phase("results_transfer"):
+                logits = logits.detach().float().cpu().numpy()
+                predictions = predictions.detach().float().cpu().numpy().reshape(-1)
+            if first.profile is not None:
+                first.profile.inference_calls += 1
+                first.profile.inference_positions += len(missing)
             if not np.isfinite(logits).all() or not np.isfinite(predictions).all():
                 raise RuntimeError("Nonfinite policy/value predictions")
             for batch_index, index in enumerate(missing):
@@ -284,7 +297,8 @@ class MCTS:
                 search.cache[node.position] = (priors, value)
                 if len(search.cache) > search.cache_size:
                     search.cache.popitem(last=False)
-                MCTS._install_children(node, priors)
+                with search._phase("expansion"):
+                    MCTS._install_children(node, priors)
                 values[index] = value
         return values
 
@@ -329,15 +343,18 @@ class MCTS:
             for search, root in zip(searches, roots):
                 if simulation >= search.simulations or root.position.terminal_value() is not None:
                     continue
-                path = search._select_leaf(root)
+                with search._phase("traversal"):
+                    path = search._select_leaf(root)
                 terminal = path[-1].position.terminal_value()
                 if terminal is not None:
-                    MCTS._backup(path, terminal)
+                    with search._phase("backup"):
+                        MCTS._backup(path, terminal)
                 else:
                     paths.append(path)
                     leaves.append((search, path[-1]))
             for path, value in zip(paths, MCTS._expand_many(leaves)):
-                MCTS._backup(path, value)
+                with searches[0]._phase("backup"):
+                    MCTS._backup(path, value)
         results = []
         for root in roots:
             visits = np.zeros(root.position.config.cols, dtype=np.int64)
