@@ -51,8 +51,10 @@ function initBoardGrid() {
   }
 }
 
-function renderBoard() {
+function renderBoard(options = {}) {
   const slots = document.querySelectorAll('.board-slot');
+  const newlyDropped = options.newlyDropped || [];
+
   slots.forEach(slot => {
     const r = parseInt(slot.dataset.row);
     const c = parseInt(slot.dataset.col);
@@ -62,6 +64,11 @@ function renderBoard() {
     if (piece === 1 || piece === 2) {
       const token = document.createElement('div');
       token.className = `disc-token ${piece === 1 ? 'red' : 'yellow'}`;
+
+      // Apply tactile drop physics animation if newly dropped
+      if (newlyDropped.some(d => d.row === r && d.col === c)) {
+        token.classList.add('dropped');
+      }
 
       // Check if winning piece
       if (gameState.win_coords && gameState.win_coords.some(([wr, wc]) => wr === r && wc === c)) {
@@ -352,25 +359,64 @@ async function fetchState() {
 }
 
 async function handleSlotClick(col) {
-  if (gameState.is_thinking) return;
+  if (gameState.is_thinking || gameState.game_over) return;
+
+  // 1. Instant client-side validation
+  let openRow = -1;
+  for (let r = 0; r < 6; r++) {
+    if (gameState.board[r][col] === 0) {
+      openRow = r;
+      break;
+    }
+  }
+  if (openRow === -1) return; // Column is full, reject click immediately
+
+  // 2. OPTIMISTIC INSTANT LOCAL UPDATE (0ms tactile reaction!)
+  const humanPiece = gameState.to_play;
+  gameState.board[openRow][col] = humanPiece;
+  const nextPiece = 3 - humanPiece;
+  gameState.to_play = nextPiece;
+
+  // Animate human disc dropping into place immediately
+  renderBoard({ newlyDropped: [{ row: openRow, col: col }] });
+
+  // If opponent is AI, immediately update status to calculating
+  const isOpponentAi = (nextPiece === 1 ? gameState.player_red : gameState.player_yellow) !== 'human' 
+                       && !gameState.sandbox_active;
+  if (isOpponentAi) {
+    setThinking(true);
+  }
+
+  // 3. Send move to server with auto_ai flag
   try {
     const res = await fetch('/api/move', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ col: col }),
+      body: JSON.stringify({ col: col, auto_ai: isOpponentAi }),
     });
     if (!res.ok) {
-      const err = await res.json();
-      console.warn('Move rejected:', err.detail);
+      // Revert optimistic move on failure
+      gameState.board[openRow][col] = 0;
+      gameState.to_play = humanPiece;
+      renderBoard();
+      setThinking(false);
       return;
     }
     const data = await res.json();
-    updateUI(data);
-
-    // Auto-trigger AI if next turn is AI
-    checkAndTriggerAi();
+    
+    // If AI replied in the same roundtrip, animate its disc dropping
+    if (data.last_ai_move) {
+      updateUI(data, { newlyDropped: [data.last_ai_move] });
+    } else {
+      updateUI(data);
+    }
   } catch (err) {
     console.error('Move error:', err);
+    gameState.board[openRow][col] = 0;
+    gameState.to_play = humanPiece;
+    renderBoard();
+  } finally {
+    setThinking(false);
   }
 }
 
@@ -380,7 +426,11 @@ async function triggerAiMove() {
   try {
     const res = await fetch('/api/ai_move', { method: 'POST' });
     const data = await res.json();
-    updateUI(data);
+    if (data.last_ai_move) {
+      updateUI(data, { newlyDropped: [data.last_ai_move] });
+    } else {
+      updateUI(data);
+    }
   } catch (err) {
     console.error('AI Move error:', err);
   } finally {
@@ -503,11 +553,11 @@ function toggleAiVsAi() {
 
 // --- 7. UI Update Aggregator ---
 
-function updateUI(data) {
+function updateUI(data, options = {}) {
   gameState = data;
 
   // 1. Board & Pieces
-  renderBoard();
+  renderBoard(options);
 
   // 2. Win Rate Bar
   const redRate = data.analysis?.win_rate_red ?? 50.0;

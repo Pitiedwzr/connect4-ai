@@ -121,6 +121,7 @@ game_session = GameSession()
 # --- Request Models ---
 class MoveRequest(BaseModel):
     col: int
+    auto_ai: bool = False
 
 
 class ResetRequest(BaseModel):
@@ -216,8 +217,9 @@ async def make_move(req: MoveRequest):
             delta_win_rate = round(best_cand.win_rate, 1)
         quality_label, quality_color = classify_move_quality(delta_win_rate)
 
+    last_ai_move = None
+
     if not game_session.sandbox_active:
-        # Check winning coordinates
         from game import get_winning_coordinates
         if is_win:
             game_session.game_over = True
@@ -243,12 +245,62 @@ async def make_move(req: MoveRequest):
         )
         game_session.to_play = 3 - to_play
         next_to_play = game_session.to_play
+
+        # Auto AI response in a single smooth cycle
+        if not game_session.game_over and req.auto_ai:
+            next_player = game_session.player_red if next_to_play == 1 else game_session.player_yellow
+            if next_player != "human":
+                loop = asyncio.get_event_loop()
+                ai_analysis = await loop.run_in_executor(
+                    executor,
+                    analysis_engine.analyze,
+                    board.copy(),
+                    next_to_play,
+                    next_player if next_player in ("alphazero", "dqn") else "alphazero",
+                    game_session.simulations,
+                )
+                ai_col = ai_analysis.best_move
+                if ai_col is None:
+                    valid_cols = get_valid_locations(board)
+                    ai_col = valid_cols[0] if valid_cols else None
+
+                if ai_col is not None:
+                    ai_row = get_next_open_row(board, ai_col)
+                    drop_piece(board, ai_row, ai_col, next_to_play)
+                    ai_win = winning_move(board, next_to_play)
+                    ai_draw = is_terminal_node(board) and not ai_win
+
+                    if ai_win:
+                        game_session.game_over = True
+                        game_session.winner = next_to_play
+                        game_session.win_coords = [list(c) for c in get_winning_coordinates(board, next_to_play)]
+                    elif ai_draw:
+                        game_session.game_over = True
+                        game_session.winner = 0
+
+                    game_session.history.append(
+                        MoveRecord(
+                            ply=len(game_session.history) + 1,
+                            row=ai_row,
+                            col=ai_col,
+                            piece=next_to_play,
+                            timestamp=time.time(),
+                            win_rate_red=ai_analysis.win_rate_red,
+                            win_rate_yellow=ai_analysis.win_rate_yellow,
+                            quality_label="Best Move",
+                            quality_color="#10B981",
+                            delta_win_rate=0.0,
+                        )
+                    )
+                    last_ai_move = {"row": ai_row, "col": ai_col, "piece": next_to_play}
+                    game_session.to_play = 3 - next_to_play
+                    next_to_play = game_session.to_play
     else:
         game_session.sandbox_history.append(col)
         game_session.sandbox_to_play = 3 - to_play
         next_to_play = game_session.sandbox_to_play
 
-    # Compute updated analysis for the new position
+    # Compute updated analysis for the new position (human's upcoming turn)
     loop = asyncio.get_event_loop()
     game_session.current_analysis = await loop.run_in_executor(
         executor,
@@ -259,7 +311,9 @@ async def make_move(req: MoveRequest):
         game_session.simulations,
     )
 
-    return await get_state()
+    state = await get_state()
+    state["last_ai_move"] = last_ai_move
+    return state
 
 
 @app.post("/api/ai_move")
@@ -275,14 +329,14 @@ async def trigger_ai_move():
 
     game_session.is_thinking = True
     try:
-        board = game_session.get_effective_board().copy()
+        board = game_session.get_effective_board()
         loop = asyncio.get_event_loop()
 
-        # Run analysis to find best move
+        # Run analysis once to find best move and candidates
         analysis = await loop.run_in_executor(
             executor,
             analysis_engine.analyze,
-            board,
+            board.copy(),
             to_play,
             current_player if current_player in ("alphazero", "dqn") else "alphazero",
             game_session.simulations,
@@ -293,9 +347,53 @@ async def trigger_ai_move():
             valid_cols = get_valid_locations(board)
             best_col = valid_cols[0] if valid_cols else None
 
-        if best_col is not None:
-            game_session.current_analysis = analysis
-            return await make_move(MoveRequest(col=best_col))
+        if best_col is None:
+            return await get_state()
+
+        row = get_next_open_row(board, best_col)
+        drop_piece(board, row, best_col, to_play)
+        is_win = winning_move(board, to_play)
+        is_draw = is_terminal_node(board) and not is_win
+
+        from game import get_winning_coordinates
+        if is_win:
+            game_session.game_over = True
+            game_session.winner = to_play
+            game_session.win_coords = [list(c) for c in get_winning_coordinates(board, to_play)]
+        elif is_draw:
+            game_session.game_over = True
+            game_session.winner = 0
+
+        game_session.history.append(
+            MoveRecord(
+                ply=len(game_session.history) + 1,
+                row=row,
+                col=best_col,
+                piece=to_play,
+                timestamp=time.time(),
+                win_rate_red=analysis.win_rate_red,
+                win_rate_yellow=analysis.win_rate_yellow,
+                quality_label="Best Move",
+                quality_color="#10B981",
+                delta_win_rate=0.0,
+            )
+        )
+        game_session.to_play = 3 - to_play
+        next_to_play = game_session.to_play
+
+        # Compute analysis for human's next move
+        game_session.current_analysis = await loop.run_in_executor(
+            executor,
+            analysis_engine.analyze,
+            board.copy(),
+            next_to_play,
+            "alphazero",
+            game_session.simulations,
+        )
+
+        state = await get_state()
+        state["last_ai_move"] = {"row": row, "col": best_col, "piece": to_play}
+        return state
     finally:
         game_session.is_thinking = False
 

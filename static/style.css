@@ -402,6 +402,33 @@ body {
   100% { box-shadow: 0 0 28px #38bdf8, inset 0 0 20px #38bdf8; }
 }
 
+@keyframes discDropBounce {
+  0% {
+    transform: translateY(-380px) scale(0.96);
+    opacity: 0.6;
+  }
+  60% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+  78% {
+    transform: translateY(-16px) scale(0.98);
+  }
+  90% {
+    transform: translateY(0) scale(1);
+  }
+  96% {
+    transform: translateY(-4px) scale(1);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+.disc-token.dropped {
+  animation: discDropBounce 0.34s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
 /* Ghost Piece for Principal Variation */
 .disc-token.ghost {
   opacity: 0.65;
