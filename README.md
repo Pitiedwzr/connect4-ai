@@ -455,6 +455,24 @@ Terminal play is available without Pygame, including `--raw` policy play:
 uv run play_alphazero.py --cpu --simulations 128
 ```
 
+### AlphaGo Analysis Studio (Web UI)
+
+Launch the AlphaGo-style analysis studio modeled after DeepMind's evaluation interfaces (Lizzie / KaTrain / Chess.com Review):
+
+```powershell
+uv run python run_studio.py
+```
+
+Features included:
+- **Real-Time Win Rate Advantage Gauge**: Dynamic Red vs. Yellow winning probabilities derived from MCTS root value heads.
+- **Match Win Rate Timeline**: Full-game evaluation curve plotted along plies. Clicking any point scrubs the board to that move.
+- **Candidate Move Overlays (HUD)**: Expected value (Q-value), MCTS visit count ($N$), visit share ($\pi$), and policy prior ($P$) displayed directly above each column.
+- **Principal Variation (PV) & Ghost Piece Forecast**: Hovering over any candidate move previews the anticipated future continuation on the board with ghost discs and step numbers.
+- **Game Review & Blunder Detection**: Automatic move quality classification (*Best Move*, *Excellent*, *Good*, *Inaccuracy*, *Mistake*, *Blunder*) with delta win rate drop.
+- **What-If Sandbox**: Fork positions at any historical ply and test alternative moves without altering the main game record.
+- **Deep Analyze**: On-demand deep search budget (up to 1,024+ simulations).
+
+
 ### Larger boards
 
 The new environment and search use Python-integer bitboards and dimensions from
