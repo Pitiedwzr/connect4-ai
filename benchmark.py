@@ -1,10 +1,14 @@
 """Frozen, reproducible evaluation without exploration or training opponents."""
 import argparse
+from dataclasses import asdict
 import json
 import math
+from pathlib import Path
 import random
+import time
 
 import torch
+from connect4_jax.cli import add_search_arguments, search_overrides
 
 from agent import DuelingConnect4Net
 from game import (create_board, drop_piece, get_candidate_moves, get_next_open_row,
@@ -129,7 +133,15 @@ def main():
     parser.add_argument("--simulations", type=int, default=128, help="AlphaZero search budget per move")
     parser.add_argument("--c-puct", type=float, default=1.5)
     parser.add_argument("--search-policy", choices=("puct", "gumbel"), help="Equinox only; defaults to checkpoint metadata")
+    add_search_arguments(parser)
+    add_search_arguments(parser, prefix="opponent-")
+    parser.add_argument("--opponent-search-policy", choices=("puct", "gumbel"),
+                        help="Optional opponent policy override; otherwise uses --search-policy or its checkpoint")
     parser.add_argument("--dqn-opponent", help="Optional DQN checkpoint to include as an opponent")
+    parser.add_argument("--opponent-model", help="Optional Equinox checkpoint to include as an opponent")
+    parser.add_argument("--opponent-simulations", type=int, default=128, help="Simulations for opponent model")
+    parser.add_argument("--opponent-raw", action="store_true", help="Use raw policy for opponent model")
+    parser.add_argument("--output", help="Optional path to save JSON report")
     args = parser.parse_args()
     if any(d < 1 for d in args.depths):
         parser.error("depths must be positive")
@@ -140,20 +152,26 @@ def main():
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
     if device.type == "cpu":
         torch.set_num_threads(1)
-    move_fn = None
+    base_move_fn = None
     if args.agent == "equinox":
         from connect4_jax.agent import AlphaZeroAgent
         from connect4_jax.checkpoint import DEFAULT_MODEL_PATH
         import numpy as np
-        player = AlphaZeroAgent.from_checkpoint(args.model or DEFAULT_MODEL_PATH, args.simulations, args.c_puct, args.search_policy)
+        player = AlphaZeroAgent.from_checkpoint(args.model or DEFAULT_MODEL_PATH, args.simulations, args.c_puct,
+                                               args.search_policy, **search_overrides(args))
         if (player.model.config.rows, player.model.config.cols, player.model.config.connect) != (6, 7, 4):
             parser.error("The baseline benchmark requires a standard 6x7 Connect 4 checkpoint")
+        if args.raw:
+            player.get_move(np.zeros((6, 7), np.int8), raw=True)
+        else:
+            player.warmup()
         net = None
-        move_fn = lambda board, my, other: player.get_move(board, my, other, raw=args.raw)
+        base_move_fn = lambda board, my, other: player.get_move(board, my, other, raw=args.raw)
         logits, value = player.predict(np.zeros((6, 7), np.int8), 1)
         probabilities = np.exp(logits - logits.max())
         opening_policy = (probabilities / probabilities.sum()).tolist()
         report = dict(agent="equinox", mode="raw" if args.raw else "mctx", device="cpu",
+                      model=str(args.model or DEFAULT_MODEL_PATH), search=asdict(player.settings),
                       search_policy=player.settings.policy,
                       simulations=0 if args.raw else args.simulations, c_puct=args.c_puct,
                       opening_policy=opening_policy, opening_value=value,
@@ -164,7 +182,7 @@ def main():
         if (net.config.rows, net.config.cols, net.config.connect) != (6, 7, 4):
             parser.error("The baseline benchmark currently uses standard 6x7 Connect 4 positions")
         player = AlphaZeroAgent(net, args.simulations, args.c_puct)
-        move_fn = lambda board, my, other: player.get_move(board, my, other, raw=args.raw)
+        base_move_fn = lambda board, my, other: player.get_move(board, my, other, raw=args.raw)
         with torch.no_grad():
             logits, value = net(torch.from_numpy(Position.empty(net.config).encode()).unsqueeze(0).to(device))
             opening_policy = torch.softmax(logits[0], dim=0).cpu().tolist()
@@ -177,6 +195,7 @@ def main():
         net.load_state_dict(torch.load(args.model or "model/connect4_model_selfplay.pth",
                                        map_location=device, weights_only=True))
         net.eval()
+        base_move_fn = lambda board, my, other: network_move(net, board, my, other, raw=args.raw)
         with torch.no_grad():
             opening_q = net(get_state_tensor(create_board(), 1, 2).to(device))[0].cpu().tolist()
         report = dict(agent="dqn", mode="raw" if args.raw else "tactical", opening_q=opening_q,
@@ -187,10 +206,57 @@ def main():
         opponent.load_state_dict(torch.load(args.dqn_opponent, map_location=device, weights_only=True))
         opponent.eval()
         extra_opponents["dqn"] = lambda board, my, other: network_move(opponent, board, my, other)
-    report.update(seed=args.seed, opening_plies=args.opening_plies,
-                  results=evaluate_network(net, args.games, args.seed, tuple(args.depths), args.raw,
-                                           args.opening_plies, move_fn, extra_opponents))
-    print(json.dumps(report, indent=2))
+    if args.opponent_model:
+        from connect4_jax.agent import AlphaZeroAgent
+        import numpy as np
+        opp_path = Path(args.opponent_model)
+        opp_agent = AlphaZeroAgent.from_checkpoint(
+            args.opponent_model,
+            args.opponent_simulations,
+            args.c_puct,
+            args.opponent_search_policy or args.search_policy,
+            **search_overrides(args, prefix="opponent_"),
+        )
+        if args.opponent_raw:
+            opp_agent.get_move(np.zeros((6, 7), np.int8), raw=True)
+        else:
+            opp_agent.warmup()
+        opp_name = opp_path.parent.name
+        if not opp_name or opp_name in (".", "model"):
+            opp_name = opp_path.stem
+        opp_key = f"equinox_{opp_name}_{args.opponent_simulations}sim" if not args.opponent_raw else f"equinox_{opp_name}_raw"
+        extra_opponents[opp_key] = lambda board, my, other: opp_agent.get_move(board, my, other, raw=args.opponent_raw)
+        report["opponent_model"] = str(opp_path)
+        report["opponent_search"] = asdict(opp_agent.settings)
+
+    latencies = []
+
+    def move_fn(board, my, other):
+        start = time.perf_counter()
+        action = base_move_fn(board, my, other)
+        latencies.append(time.perf_counter() - start)
+        return action
+
+    results = evaluate_network(net, args.games, args.seed, tuple(args.depths), args.raw,
+                               args.opening_plies, move_fn, extra_opponents)
+    report.update(seed=args.seed, opening_plies=args.opening_plies, results=results)
+    if latencies:
+        import numpy as np
+        report["latency_ms"] = dict(
+            mean=round(float(np.mean(latencies) * 1000), 2),
+            p50=round(float(np.percentile(latencies, 50) * 1000), 2),
+            p95=round(float(np.percentile(latencies, 95) * 1000), 2),
+            min=round(float(np.min(latencies) * 1000), 2),
+            max=round(float(np.max(latencies) * 1000), 2),
+            moves=len(latencies),
+        )
+    output_str = json.dumps(report, indent=2)
+    print(output_str)
+    if args.output:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(output_str)
 
 
 if __name__ == "__main__":

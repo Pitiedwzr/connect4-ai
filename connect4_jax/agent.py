@@ -21,23 +21,31 @@ def _search(model, state, settings):
     states = jax.tree.map(lambda x: x[None], state)
     result = search(model, states, jax.random.PRNGKey(0), settings, add_noise=False)
     summary = result.search_tree.summary()
-    action = result.action[0] if settings.policy == "gumbel" else jnp.argmax(summary.visit_counts[0])
+    action = result.action[0] if settings.policy == "gumbel" else jnp.argmax(result.action_weights[0])
     return result.action_weights[0], summary.visit_counts[0], summary.value[0], action
 
 
 class AlphaZeroAgent:
-    def __init__(self, model, simulations=128, c_puct=1.5, search_policy="puct"):
+    def __init__(self, model, simulations=128, c_puct=1.5, search_policy="puct", *,
+                 proven_win_priority=False, prior_temperature=1.0, gumbel_q_scale=0.1):
         self.device = jax.devices("cpu")[0]
         self.model = jax.device_put(model, self.device)
-        self.settings = SearchConfig(simulations=simulations, c_puct=c_puct, policy=search_policy)
+        self.settings = SearchConfig(simulations=simulations, c_puct=c_puct, policy=search_policy,
+                                     proven_win_priority=proven_win_priority,
+                                     prior_temperature=prior_temperature, gumbel_q_scale=gumbel_q_scale)
         self.last_result = None
         self._lock = threading.Lock()
 
     @classmethod
-    def from_checkpoint(cls, path=DEFAULT_MODEL_PATH, simulations=128, c_puct=1.5, search_policy=None):
+    def from_checkpoint(cls, path=DEFAULT_MODEL_PATH, simulations=128, c_puct=1.5, search_policy=None, *,
+                        proven_win_priority=None, prior_temperature=None, gumbel_q_scale=None):
         model, metadata = load_checkpoint(path, jax.devices("cpu")[0])
-        policy = search_policy or metadata.get("search", {}).get("policy", metadata.get("training_args", {}).get("search_policy", "puct"))
-        return cls(model, simulations, c_puct, policy)
+        settings = SearchConfig.from_metadata(metadata, simulations=simulations, c_puct=c_puct,
+                                              policy=search_policy, proven_win_priority=proven_win_priority,
+                                              prior_temperature=prior_temperature, gumbel_q_scale=gumbel_q_scale)
+        return cls(model, simulations, c_puct, settings.policy,
+                   proven_win_priority=settings.proven_win_priority,
+                   prior_temperature=settings.prior_temperature, gumbel_q_scale=settings.gumbel_q_scale)
 
     def predict(self, board, to_play):
         with jax.default_device(self.device):
@@ -68,5 +76,8 @@ class AlphaZeroAgent:
             if not legal[action]:
                 raise RuntimeError("Search returned an illegal action")
             self.last_result = dict(policy=np.asarray(policy), visits=np.asarray(visits), value=float(value),
-                                    action=action, search_policy=self.settings.policy)
+                                    action=action, search_policy=self.settings.policy,
+                                    proven_win_priority=self.settings.proven_win_priority,
+                                    prior_temperature=self.settings.prior_temperature,
+                                    gumbel_q_scale=self.settings.gumbel_q_scale)
             return action

@@ -153,6 +153,7 @@ class ExperimentTests(JaxTestCase):
 
     def test_retained_checkpoints_and_gumbel_prefix_resume_match_full_run(self):
         command = [sys.executable, str(ROOT / "train_jax.py"), "--cpu", "--games-per-device", "2",
+                   "--proven-win-priority", "--prior-temperature", "1.5", "--gumbel-q-scale", "0.2",
                    "--search-policy", "gumbel", "--simulations", "8", "--opening-fraction", "0.5",
                    "--opening-plies", "4", "--batch-size", "4", "--updates-per-iteration", "1",
                    "--warmup-positions", "4", "--replay-capacity", "64", "--rows", "4", "--cols", "4",
@@ -178,5 +179,8 @@ class ExperimentTests(JaxTestCase):
             self.assertEqual(full_metadata["jax_key"], partial_metadata["jax_key"])
             self.assertEqual(full_metadata["numpy_rng"], partial_metadata["numpy_rng"])
             self.assertEqual(partial_metadata["search"]["policy"], "gumbel")
+            self.assertTrue(partial_metadata["search"]["proven_win_priority"])
+            self.assertEqual(partial_metadata["search"]["prior_temperature"], 1.5)
+            self.assertEqual(partial_metadata["search"]["gumbel_q_scale"], 0.2)
             for a, b in zip(jax.tree.leaves(full_model), jax.tree.leaves(partial_model)):
                 np.testing.assert_array_equal(a, b)

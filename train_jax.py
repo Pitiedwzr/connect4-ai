@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from connect4_jax.checkpoint import DEFAULT_MODEL_PATH, load_checkpoint, restore_training, save_checkpoint
+from connect4_jax.cli import add_search_arguments, search_overrides
 from connect4_jax.config import Config
 from connect4_jax.network import PolicyValueNet
 from connect4_jax.replay import Replay
@@ -26,6 +27,7 @@ def parse_args(argv=None):
     parser.add_argument("--games-per-device", type=int, default=None)
     parser.add_argument("--simulations", type=int, default=64)
     parser.add_argument("--search-policy", choices=("puct", "gumbel"), default="puct")
+    add_search_arguments(parser, checkpoint_defaults=False)
     parser.add_argument("--opening-fraction", type=float, default=0.0, help="Fraction of self-play games using random legal prefixes")
     parser.add_argument("--opening-plies", type=int, default=8, help="Maximum random prefix length (1..N)")
     parser.add_argument("--preset", choices=("improve", "larger"), help="Recommended experiments; explicit options override preset values")
@@ -68,6 +70,8 @@ def parse_args(argv=None):
     supplied = sys.argv[1:] if argv is None else argv
     args.explicit_options = {arg.split("=", 1)[0][2:].replace("-", "_")
                              for arg in supplied if arg.startswith("--")}
+    if "no_proven_win_priority" in args.explicit_options:
+        args.explicit_options.add("proven_win_priority")
     if args.preset:
         recommended = dict(search_policy="gumbel", simulations=128, opening_fraction=0.2,
                            learning_rate=0.0003, checkpoint_every=100, eval_every=100)
@@ -91,6 +95,7 @@ def train(args):
                      "warmup_positions", "replay_capacity", "learning_rate", "weight_decay",
                      "temperature_moves", "c_puct", "dirichlet_alpha", "noise_fraction", "precision", "seed",
                      "search_memory_mb", "search_policy", "opening_fraction", "opening_plies",
+                     "proven_win_priority", "prior_temperature", "gumbel_q_scale",
                      "eval_every", "eval_games", "eval_depths", "eval_seed", "eval_opening_plies", "eval_simulations",
                      "checkpoint_every", "keep_checkpoints"):
             if name not in args.explicit_options and name in saved:
@@ -161,7 +166,8 @@ def train(args):
         key, init_key = jax.random.split(key)
         with jax.default_device(devices[0]):
             model = PolicyValueNet(config, init_key)
-    settings = SearchConfig(args.simulations, args.c_puct, args.dirichlet_alpha, args.noise_fraction, args.search_policy)
+    settings = SearchConfig(args.simulations, args.c_puct, args.dirichlet_alpha, args.noise_fraction,
+                            args.search_policy, **search_overrides(args))
     search_mib = tree_memory_bytes(config, args.games_per_device, args.simulations, args.search_policy) / 2**20
     if not np.isfinite(args.search_memory_mb) or args.search_memory_mb <= 0:
         raise ValueError("Search memory budget must be positive and finite")
@@ -186,14 +192,19 @@ def train(args):
                           games_per_iteration=runner.games, batch_size=args.batch_size,
                           precision=args.precision, config=asdict(config),
                           search_policy=settings.policy, opening_fraction=args.opening_fraction,
+                          search=asdict(settings),
                           search_memory_mib_per_device=search_mib)), flush=True)
     saved_args = {k: v for k, v in vars(args).items() if k != "explicit_options"}
     saved_args.update(asdict(config))
     evaluation_signature = dict(games=args.eval_games, depths=args.eval_depths, seed=args.eval_seed,
                                 opening_plies=args.eval_opening_plies, simulations=args.eval_simulations,
-                                search_policy=args.search_policy, c_puct=args.c_puct)
+                                search_policy=args.search_policy, c_puct=args.c_puct, **search_overrides(args))
+    previous_signature = dict(restored.get("evaluation_signature", {})) if restored else {}
+    if previous_signature:
+        for name, default in (("proven_win_priority", False), ("prior_temperature", 1.0), ("gumbel_q_scale", 0.1)):
+            previous_signature.setdefault(name, default)
     best_evaluation = (restored.get("best_evaluation") if restored and
-                       restored.get("evaluation_signature") == evaluation_signature and
+                       previous_signature == evaluation_signature and
                        Path(restored.get("training_args", {}).get("best_output") or "").resolve() == Path(args.best_output).resolve() and
                        Path(args.best_output).exists() else None)
     def checkpoint():
@@ -270,6 +281,7 @@ def train(args):
                       positions=positions, replay_positions=len(replay),
                       opening_games=int((trajectory.opening_plies > 0).sum()),
                       mean_opening_plies=float(trajectory.opening_plies.mean()), search_policy=settings.policy,
+                      search=asdict(settings),
                       self_play=dict(first_wins=int((trajectory.winners == 1).sum()),
                                      second_wins=int((trajectory.winners == 2).sum()),
                                      draws=int((trajectory.winners == 0).sum())),

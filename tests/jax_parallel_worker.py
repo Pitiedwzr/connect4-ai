@@ -39,7 +39,9 @@ def main():
     key = jax.random.PRNGKey(7)
     reference_collect = eqx.filter_jit(collect)
     for policy, simulations, fraction in (("puct", 2, 0.0), ("gumbel", 8, 0.5)):
-        settings = SearchConfig(simulations, policy=policy)
+        settings = SearchConfig(simulations, policy=policy, proven_win_priority=policy == "gumbel",
+                                prior_temperature=1.5 if policy == "gumbel" else 1.0,
+                                gumbel_q_scale=0.2 if policy == "gumbel" else 0.1)
         runner = Runner(parallel.model, make_optimizer(), devices, settings,
                         games_per_device=2, opening_fraction=fraction, opening_plies=4)
         trajectory = jax.device_get(runner.collect(key))

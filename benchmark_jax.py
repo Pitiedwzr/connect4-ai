@@ -2,12 +2,14 @@
 import argparse
 import json
 import time
+from dataclasses import asdict
 
 import jax
 import numpy as np
 
 from connect4_jax.agent import AlphaZeroAgent
 from connect4_jax.checkpoint import load_checkpoint
+from connect4_jax.cli import add_search_arguments, search_overrides
 from connect4_jax.config import Config
 from connect4_jax.network import PolicyValueNet
 from connect4_jax.search import SearchConfig
@@ -24,6 +26,7 @@ def main():
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--collect", action="store_true", help="Measure full accelerator self-play instead of CPU moves")
     parser.add_argument("--search-policy", choices=("puct", "gumbel"), help="Defaults to checkpoint policy, or puct without weights")
+    add_search_arguments(parser)
     parser.add_argument("--opening-fraction", type=float, default=0.0)
     parser.add_argument("--opening-plies", type=int, default=8)
     args = parser.parse_args()
@@ -40,11 +43,12 @@ def main():
             model, metadata = load_checkpoint(args.model, devices[0])
         else:
             model = PolicyValueNet(Config(), jax.random.PRNGKey(42))
-        policy = args.search_policy or metadata.get("search", {}).get("policy", metadata.get("training_args", {}).get("search_policy", "puct"))
         reports = []
         for simulations in args.simulations:
+            settings = SearchConfig.from_metadata(metadata, simulations=simulations,
+                                                  policy=args.search_policy, **search_overrides(args))
             if args.collect:
-                runner = Runner(model, make_optimizer(), devices, SearchConfig(simulations, policy=policy), args.games_per_device,
+                runner = Runner(model, make_optimizer(), devices, settings, args.games_per_device,
                                 opening_fraction=args.opening_fraction, opening_plies=args.opening_plies)
                 start = time.perf_counter()
                 jax.block_until_ready(runner.collect(jax.random.PRNGKey(0)))
@@ -60,7 +64,10 @@ def main():
                                     positions_per_second=positions / sum(seconds),
                                     games_per_minute=runner.games * args.repeats * 60 / sum(seconds)))
             else:
-                agent = AlphaZeroAgent(model, simulations, search_policy=policy)
+                agent = AlphaZeroAgent(model, simulations, settings.c_puct, settings.policy,
+                                       proven_win_priority=settings.proven_win_priority,
+                                       prior_temperature=settings.prior_temperature,
+                                       gumbel_q_scale=settings.gumbel_q_scale)
                 board = np.zeros((model.config.rows, model.config.cols), np.int8)
                 start = time.perf_counter()
                 agent.warmup()
@@ -84,8 +91,9 @@ def main():
                 reports.append(dict(simulations=simulations, warmup_seconds=warmup,
                                     p50_ms=float(np.percentile(seconds, 50) * 1000),
                                     p95_ms=float(np.percentile(seconds, 95) * 1000)))
+            reports[-1]["search"] = asdict(settings)
         print(json.dumps(dict(platform=args.platform if args.collect else "cpu",
-                             search_policy=policy,
+                             search_policy=settings.policy, model=args.model,
                              mode="self_play" if args.collect else "move_latency", reports=reports), indent=2))
 
 

@@ -4,6 +4,93 @@ Start with the existing 32-channel/two-block checkpoint. Change search, training
 coverage, and learning rate before attributing the remaining weaknesses to model
 capacity. These settings are experiments; their effect needs opponent benchmarks.
 
+## Proved-win and search-scoring experiments
+
+Start by benchmarking the frozen refined model with `--proven-win-priority`.
+This opt-in setting prefers root moves already explored by MCTS whose exact
+game transition has reward +1 and zero discount. A neural value of +1 does not
+establish a proof. Other positions retain their usual search action/targets.
+Multiple proved wins receive a normalized target distribution from their root
+priors, and the largest prior chooses the recommended move. Target calculation
+uses logits so even extremely unlikely winning moves receive finite labels.
+The rule applies to both Gumbel and PUCT, but PUCT can miss a low-prior move
+without visiting it. Terminal batch slots and illegal/unvisited edges cannot
+establish proofs. This implements immediate terminal-win priority, not general
+propagation of deeper win/loss proofs.
+
+For a controlled comparison, use the same checkpoint for both players:
+
+```bash
+uv run benchmark.py --agent equinox \
+  --model model/experiments/larger_refined/latest_best.eqx \
+  --proven-win-priority --simulations 128 \
+  --games 50 --seed 20261008 --depths 2 4 5 \
+  --opponent-model model/experiments/larger_refined/latest_best.eqx \
+  --opponent-simulations 128 --no-opponent-proven-win-priority \
+  --opponent-prior-temperature 1 --opponent-gumbel-q-scale 0.1 \
+  --output benchmarks/proven_win_seed20261008.json
+```
+
+Repeat over several seeds, including existing benchmark seeds for paired opening
+comparisons. Candidate and opponent search controls are independent; a candidate
+override does not enable proved-win priority or change scoring for the opponent.
+JSON reports record both effective configurations. Opponent policy can be set
+with `--opponent-search-policy`; absent that flag, an explicit `--search-policy`
+continues to apply to both players, otherwise each checkpoint supplies its policy.
+
+The default controls preserve existing checkpoints:
+
+| Flag | Default for old checkpoints | Effect |
+|---|---:|---|
+| `--proven-win-priority` | Off | Prefer proved immediate wins and correct self-play targets |
+| `--prior-temperature` | 1.0 | Divide root and leaf policy logits; greater values flatten priors |
+| `--gumbel-q-scale` | 0.1 | Scale Gumbel's completed Q values; PUCT ignores this setting |
+
+Temperature and Q scale must be finite and positive. These are search parameters;
+raw prediction remains unchanged. `--c-puct` only tunes PUCT. Proved-win priority
+and scoring controls are supported by `train_jax.py`, `play_jax.py`,
+`benchmark.py`, and `benchmark_jax.py`. Inference commands inherit checkpoint
+settings unless explicitly overridden; use `--no-proven-win-priority` to disable
+a saved setting. New checkpoints and inference exports record all controls.
+The GUI also inherits them automatically when loading such a checkpoint.
+
+The frozen-model diagnostic found that prior temperature 2 and Q scale 0.5
+improved immediate-win detection but reduced safe-reply accuracy. Keep 1/0.1
+as the reference while benchmarking scoring ablations; no stronger defaults
+have been established by opponent matches. Proved-win priority is opt-in even
+with the existing `improve`/`larger` presets.
+
+After validating the frozen-model variant, continue on the same T4 x 2 host:
+
+```bash
+uv run train_jax.py --platform gpu --devices 2 \
+  --resume model/experiments/larger_refined/latest.eqx \
+  --preset improve --proven-win-priority --iterations 500 \
+  --prior-temperature 1 --gumbel-q-scale 0.1 \
+  --output model/experiments/proven_win/latest.eqx \
+  --export model/experiments/proven_win/inference.eqx \
+  --log logs/jax_proven_win.jsonl
+```
+
+This keeps the loaded 64-channel/two-block architecture and uses learning rate
+0.0003. Resume restores optimizer/replay/RNG state and the saved controls unless
+explicitly overridden. Existing replay labels turn over gradually; `--init-from`
+starts with weights and a fresh optimizer/replay. The new option corrects both
+the self-play action and its policy target whenever a proved win is present.
+PUCT's temperature sampling also stays within proved winning actions.
+
+Periodic evaluation uses the same effective controls as self-play. Changing
+controls starts a new best-model comparison; retain the previous reference for
+held-out evaluation. The original refined checkpoint and benchmarks remain
+preserved by the separate output paths above.
+
+```bash
+uv run benchmark_jax.py --model model/experiments/larger_refined/latest_best.eqx \
+  --proven-win-priority --simulations 64 128 256 --repeats 30
+uv run play_jax.py --model model/experiments/larger_refined/latest_best.eqx \
+  --proven-win-priority --simulations 128
+```
+
 ## Continue the trained model on T4 x 2
 
 On the Linux training host, use the existing CUDA installation profile and run:

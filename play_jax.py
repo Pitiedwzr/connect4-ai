@@ -6,6 +6,7 @@ import numpy as np
 
 from connect4_jax.agent import AlphaZeroAgent
 from connect4_jax.checkpoint import DEFAULT_MODEL_PATH
+from connect4_jax.cli import add_search_arguments, search_overrides
 from connect4_jax.environment import empty, legal_actions, step
 
 
@@ -14,10 +15,12 @@ def main():
     parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
     parser.add_argument("--simulations", type=int, default=128)
     parser.add_argument("--search-policy", choices=("puct", "gumbel"), help="Defaults to checkpoint metadata")
+    add_search_arguments(parser)
     parser.add_argument("--ai-first", action="store_true")
     parser.add_argument("--raw", action="store_true")
     args = parser.parse_args()
-    agent = AlphaZeroAgent.from_checkpoint(args.model, args.simulations, search_policy=args.search_policy)
+    agent = AlphaZeroAgent.from_checkpoint(args.model, args.simulations, search_policy=args.search_policy,
+                                          **search_overrides(args))
     config = agent.model.config
     human = 2 if args.ai_first else 1
     with jax.default_device(agent.device):

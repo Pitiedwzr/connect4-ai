@@ -10,8 +10,10 @@ Python 3.12 or newer is required.
 For the next strength experiments, see [EXPERIMENTS.md](EXPERIMENTS.md).
 It includes Gumbel search, random legal opening prefixes, reduced-learning-rate
 continuation, retained snapshots, periodic raw/search evaluation, and a separate
-64-channel capacity experiment. Existing checkpoints continue to use PUCT unless
-overridden; new checkpoints record their search policy for CPU inference.
+64-channel capacity experiment. Checkpoints retain their saved search policy;
+older checkpoints without policy metadata default to PUCT for CPU inference.
+The guide also covers opt-in `--proven-win-priority`, policy prior temperature,
+and Gumbel Q-value scaling, with independent controls for benchmark opponents.
 
 `train_jax.py` uses a residual Equinox policy/value network, Optax AdamW, and
 exact game transitions inside mctx PUCT or Gumbel search. Board updates, leaf inference,
