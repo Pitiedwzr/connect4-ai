@@ -7,6 +7,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import zipfile
 from unittest.mock import patch
 
 import equinox as eqx
@@ -135,8 +136,31 @@ class ExperimentTests(JaxTestCase):
             self.assertEqual(best.read_bytes(), saved)
             _, metadata = load_checkpoint(output)
             self.assertEqual(metadata["best_evaluation"]["iteration"], 1)
+            self.assertEqual(metadata['evaluation_signature']['selection'], 'suite')
+            self.assertEqual(metadata['evaluation_signature']['seeds'], [12345, 12346, 12347])
             reports = list((root / "latest_evaluations").glob("*.json"))
             self.assertEqual(len(reports), 3)
+            # An older checkpoint must resume with its single-seed rule and
+            # retain its best history rather than silently switching criteria.
+            legacy = root / 'legacy.eqx'
+            with zipfile.ZipFile(output) as source, zipfile.ZipFile(legacy, 'w') as destination:
+                for name in ('eval_selection', 'eval_seeds', 'eval_opponent_model'):
+                    metadata['training_args'].pop(name, None)
+                for name in ('selection', 'seeds'):
+                    metadata['evaluation_signature'].pop(name, None)
+                for member in source.namelist():
+                    destination.writestr(member, json.dumps(metadata) if member == 'metadata.json' else source.read(member))
+            old_args = parse_args(['--cpu', '--resume', str(legacy), '--iterations', '1'])
+            with patch('connect4_jax.evaluation.evaluate', return_value={'selection_score': 0.7, 'raw_selection_score': 0.5}), contextlib.redirect_stdout(io.StringIO()):
+                train(old_args)
+            self.assertEqual(old_args.eval_selection, 'deepest')
+            self.assertEqual(best.read_bytes(), saved)
+            # Changing the suite invalidates the previous score comparison.
+            changed = parse_args(['--cpu', '--resume', str(output), '--iterations', '1', '--eval-seeds', '99'])
+            with patch('connect4_jax.evaluation.evaluate', return_value={'selection_score': 0.1, 'raw_selection_score': 0.1}), contextlib.redirect_stdout(io.StringIO()):
+                train(changed)
+            _, changed_best = load_checkpoint(best)
+            self.assertEqual(changed_best['iteration'], 4)
 
     def test_evaluation_records_both_modes_and_preserves_random_state(self):
         model = PolicyValueNet(Config(channels=8, blocks=0), jax.random.PRNGKey(2))

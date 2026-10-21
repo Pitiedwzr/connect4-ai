@@ -17,12 +17,24 @@ def _predict(model, state):
 
 
 @eqx.filter_jit
-def _search(model, state, settings):
+def _search(model, state, settings, diagnostics=False):
     states = jax.tree.map(lambda x: x[None], state)
     result = search(model, states, jax.random.PRNGKey(0), settings, add_noise=False)
     summary = result.search_tree.summary()
     action = result.action[0] if settings.policy == "gumbel" else jnp.argmax(result.action_weights[0])
-    return result.action_weights[0], summary.visit_counts[0], summary.value[0], action
+    output = (result.action_weights[0], summary.visit_counts[0], summary.value[0], action)
+    if not diagnostics:
+        return output
+    tree = result.search_tree
+    root = tree.ROOT_INDEX
+    return (*output, dict(priors=jax.nn.softmax(tree.children_prior_logits[0, root]),
+                         qvalues=summary.qvalues[0], network_value=tree.raw_values[0, root],
+                         proven_wins=(tree.children_visits[0, root] > 0)
+                         & (tree.children_rewards[0, root] == 1)
+                         & (tree.children_discounts[0, root] == 0)
+                         & legal_actions(state),
+                         rewards=tree.children_rewards[0, root],
+                         discounts=tree.children_discounts[0, root]))
 
 
 class AlphaZeroAgent:
@@ -58,7 +70,7 @@ class AlphaZeroAgent:
         self.get_move(board, raw=True)
         self.get_move(board)
 
-    def get_move(self, board, my_piece=1, opp_piece=2, raw=False):
+    def get_move(self, board, my_piece=1, opp_piece=2, raw=False, *, diagnostics=False):
         if my_piece not in (1, 2) or opp_piece != 3 - my_piece:
             raise ValueError("AlphaZero uses pieces 1 and 2")
         with self._lock, jax.default_device(self.device):
@@ -68,10 +80,14 @@ class AlphaZeroAgent:
                 return None
             legal = np.asarray(legal_actions(state))
             if raw:
-                logits, _ = _predict(self.model, state)
-                self.last_result = None
-                return int(np.argmax(np.where(legal, np.asarray(logits), -np.inf)))
-            policy, visits, value, action = _search(self.model, state, self.settings)
+                logits, value = _predict(self.model, state)
+                action = int(np.argmax(np.where(legal, np.asarray(logits), -np.inf)))
+                self.last_result = (dict(action=action, legal=legal, network_logits=np.asarray(logits),
+                                         network_value=float(value), mode="raw") if diagnostics else None)
+                return action
+            output = (_search(self.model, state, self.settings, True) if diagnostics else
+                      _search(self.model, state, self.settings))
+            policy, visits, value, action = output[:4]
             action = int(action)
             if not legal[action]:
                 raise RuntimeError("Search returned an illegal action")
@@ -80,4 +96,7 @@ class AlphaZeroAgent:
                                     proven_win_priority=self.settings.proven_win_priority,
                                     prior_temperature=self.settings.prior_temperature,
                                     gumbel_q_scale=self.settings.gumbel_q_scale)
+            if diagnostics:
+                self.last_result.update({name: np.asarray(item) for name, item in output[4].items()})
+                self.last_result.update(legal=legal, mode="search")
             return action

@@ -1,6 +1,7 @@
 """Train an Equinox policy/value model using exact-game mctx self-play."""
 import argparse
 from dataclasses import asdict
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -58,8 +59,12 @@ def parse_args(argv=None):
     parser.add_argument("--keep-checkpoints", type=int, default=10, help="Number of snapshots to retain; 0 keeps all")
     parser.add_argument("--eval-every", type=int, default=0, help="Fixed-opponent evaluation interval; 0 disables")
     parser.add_argument("--eval-games", type=int, default=10, help="Games per seat per opponent, for each of raw/search modes")
-    parser.add_argument("--eval-depths", type=int, nargs="*", default=[2, 4])
+    parser.add_argument("--eval-depths", type=int, nargs="*", default=[2, 4, 5])
     parser.add_argument("--eval-seed", type=int, default=12345)
+    parser.add_argument("--eval-seeds", type=int, nargs="+", help="Fixed validation seeds; suite default: eval-seed and next two")
+    parser.add_argument("--eval-selection", choices=("suite", "deepest"), default="suite",
+                        help="Suite mean, weakest-opponent score, then raw mean; deepest retains legacy selection")
+    parser.add_argument("--eval-opponent-model", help="Optional frozen Equinox opponent included in suite selection")
     parser.add_argument("--eval-opening-plies", type=int, default=4)
     parser.add_argument("--eval-simulations", type=int, default=128)
     parser.add_argument("--best-output", help="Best inference checkpoint; default: output stem + _best.eqx")
@@ -91,12 +96,16 @@ def train(args):
     if args.resume:
         model, restored = load_checkpoint(args.resume)
         saved = restored.get("training_args", {})
+        # Older checkpoints retain their previous evaluation behavior on resume.
+        if "eval_selection" not in saved and "eval_selection" not in args.explicit_options:
+            args.eval_selection = "deepest"
         for name in ("games_per_device", "simulations", "batch_size", "updates_per_iteration",
                      "warmup_positions", "replay_capacity", "learning_rate", "weight_decay",
                      "temperature_moves", "c_puct", "dirichlet_alpha", "noise_fraction", "precision", "seed",
                      "search_memory_mb", "search_policy", "opening_fraction", "opening_plies",
                      "proven_win_priority", "prior_temperature", "gumbel_q_scale",
                      "eval_every", "eval_games", "eval_depths", "eval_seed", "eval_opening_plies", "eval_simulations",
+                     "eval_seeds", "eval_selection", "eval_opponent_model",
                      "checkpoint_every", "keep_checkpoints"):
             if name not in args.explicit_options and name in saved:
                 setattr(args, name, saved[name])
@@ -147,11 +156,19 @@ def train(args):
         raise ValueError("Evaluation/retention settings must be nonnegative with positive games/simulations")
     if any(depth < 1 for depth in args.eval_depths) or not 0 <= args.eval_opening_plies <= 12:
         raise ValueError("Evaluation depths must be positive and opening plies in [0,12]")
+    if len(set(args.eval_depths)) != len(args.eval_depths):
+        raise ValueError("Evaluation depths must be unique")
+    if args.eval_seed < 0 or (args.eval_seeds is not None and
+                             (len(set(args.eval_seeds)) != len(args.eval_seeds) or any(s < 0 for s in args.eval_seeds))):
+        raise ValueError("Evaluation seeds must be unique and nonnegative")
     if args.eval_every and (config.rows, config.cols, config.connect) != (6, 7, 4):
         raise ValueError("Disable --eval-every for nonstandard boards")
     if args.search_policy == "gumbel" and (args.simulations < config.cols or (args.eval_every and args.eval_simulations < config.cols)):
         raise ValueError("Gumbel simulations must be at least the number of columns")
     args.best_output = args.best_output or str(Path(args.output).with_name(Path(args.output).stem + "_best.eqx"))
+    if args.eval_opponent_model and any(Path(args.eval_opponent_model).resolve() == Path(path).resolve()
+                                       for path in (args.output, args.export, args.best_output) if path):
+        raise ValueError("Frozen opponent must be separate from training outputs")
     if args.eval_every and any(Path(args.best_output).resolve() == Path(p).resolve()
                               for p in (args.output, args.export) if p):
         raise ValueError("Best checkpoint must have a separate path from latest/export")
@@ -199,6 +216,13 @@ def train(args):
     evaluation_signature = dict(games=args.eval_games, depths=args.eval_depths, seed=args.eval_seed,
                                 opening_plies=args.eval_opening_plies, simulations=args.eval_simulations,
                                 search_policy=args.search_policy, c_puct=args.c_puct, **search_overrides(args))
+    if args.eval_selection != "deepest" or args.eval_seeds is not None or args.eval_opponent_model:
+        evaluation_signature.update(selection=args.eval_selection,
+                                    seeds=args.eval_seeds or ([args.eval_seed + i for i in range(3)]
+                                                             if args.eval_selection == "suite" else [args.eval_seed]))
+        if args.eval_opponent_model:
+            evaluation_signature.update(opponent_model=str(Path(args.eval_opponent_model).resolve()),
+                                        opponent_sha256=hashlib.sha256(Path(args.eval_opponent_model).read_bytes()).hexdigest())
     previous_signature = dict(restored.get("evaluation_signature", {})) if restored else {}
     if previous_signature:
         for name, default in (("proven_win_priority", False), ("prior_temperature", 1.0), ("gumbel_q_scale", 0.1)):
@@ -233,7 +257,8 @@ def train(args):
                                and p.suffix == ".eqx" and p.name[len(prefix):-4].isdigit())
             if args.keep_checkpoints:
                 for expired in snapshots[:-args.keep_checkpoints]:
-                    expired.unlink()
+                    if not args.eval_opponent_model or expired.resolve() != Path(args.eval_opponent_model).resolve():
+                        expired.unlink()
 
     start_iteration = iteration
     start = time.perf_counter()
@@ -259,12 +284,12 @@ def train(args):
         current_evaluation = None
         evaluation_seconds = 0.0
         if args.eval_every and (iteration % args.eval_every == 0 or iteration == start_iteration + args.iterations):
-            from connect4_jax.evaluation import evaluate
+            from connect4_jax.evaluation import evaluate, evaluation_rank
             eval_start = time.perf_counter()
             current_evaluation = evaluate(runner.model, **evaluation_signature)
             current_evaluation["iteration"] = iteration
-            rank = (current_evaluation["selection_score"], current_evaluation["raw_selection_score"])
-            previous = (best_evaluation["selection_score"], best_evaluation["raw_selection_score"]) if best_evaluation else (-1, -1)
+            rank = evaluation_rank(current_evaluation)
+            previous = evaluation_rank(best_evaluation) if best_evaluation else (-1, -1, -1)
             if rank > previous:
                 best_evaluation = current_evaluation
                 save_checkpoint(args.best_output, runner.model,

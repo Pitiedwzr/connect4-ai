@@ -14,6 +14,11 @@ continuation, retained snapshots, periodic raw/search evaluation, and a separate
 older checkpoints without policy metadata default to PUCT for CPU inference.
 The guide also covers opt-in `--proven-win-priority`, policy prior temperature,
 and Gumbel Q-value scaling, with independent controls for benchmark opponents.
+It now includes optional replayable loss traces (`--trace-output`),
+`analyze_traces.py`, and CPU checkpoint selection with `select_jax_checkpoint.py`.
+New training evaluations select across several seeds and opponent depths, with
+an optional frozen neural opponent; older checkpoints retain their saved rule
+on resume unless explicitly upgraded.
 
 `train_jax.py` uses a residual Equinox policy/value network, Optax AdamW, and
 exact game transitions inside mctx PUCT or Gumbel search. Board updates, leaf inference,

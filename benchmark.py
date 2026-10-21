@@ -1,6 +1,9 @@
 """Frozen, reproducible evaluation without exploration or training opponents."""
 import argparse
+from contextlib import ExitStack
+import copy
 from dataclasses import asdict
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -45,7 +48,8 @@ def teacher_move(board, my_piece, opp_piece, depth):
 
 
 def evaluate_network(net, games=20, seed=12345, depths=(2, 4), raw=False, opening_plies=4,
-                     move_fn=None, extra_opponents=None):
+                     move_fn=None, extra_opponents=None, *, trace_fn=None, trace_filter=None,
+                     diagnostics_fn=None):
     """Report W/D/L by seat with paired, seeded opening positions.
 
     The first game starts empty. Other games use random legal opening prefixes
@@ -71,22 +75,32 @@ def evaluate_network(net, games=20, seed=12345, depths=(2, 4), raw=False, openin
             for seat in (1, 2):
                 counts = dict(wins=0, draws=0, losses=0)
                 for game_index in range(games):
-                    random.seed(seed + opponent_index * 100000 + game_index)
+                    game_seed = seed + opponent_index * 100000 + game_index
+                    random.seed(game_seed)
                     board, turn = create_board(), 1
+                    opening = []
                     # Both seats see the same prefix. Twelve plies cannot fill
                     # the board; discard any prefix with an early win.
                     if game_index and opening_plies:
                         while True:
                             board, turn, terminal = create_board(), 1, False
+                            opening = []
                             for _ in range(random.randint(1, opening_plies)):
                                 col = random.choice(get_valid_locations(board))
                                 drop_piece(board, get_next_open_row(board, col), col, turn)
+                                opening.append(int(col))
                                 if winning_move(board, turn):
                                     terminal = True
                                     break
                                 turn = 3 - turn
                             if not terminal:
                                 break
+                    tracing = trace_fn is not None and (trace_filter is None or trace_filter(opponent, seat))
+                    if tracing:
+                        initial_board = board.astype(int).tolist()
+                        moves = []
+                        opening_id = hashlib.sha256(json.dumps(opening).encode()).hexdigest()[:16]
+                    winner = 0
                     while True:
                         legal = get_valid_locations(board)
                         if not legal:
@@ -107,11 +121,31 @@ def evaluate_network(net, games=20, seed=12345, depths=(2, 4), raw=False, openin
                                              ai_piece=turn, player_piece=3 - turn)
                         if col not in legal:
                             raise RuntimeError(f"Illegal move {col} from {opponent}")
+                        if tracing:
+                            move = dict(ply=len(opening) + len(moves), player=turn,
+                                        actor="candidate" if turn == seat else "opponent",
+                                        action=int(col), board_before=board.astype(int).tolist())
+                            if turn == seat:
+                                from benchmark_traces import tactical_diagnostics
+                                move["tactics"] = tactical_diagnostics(board, seat, col)
+                                if diagnostics_fn is not None:
+                                    move["diagnostics"] = copy.deepcopy(diagnostics_fn(board, seat, 3-seat))
+                            moves.append(move)
                         drop_piece(board, get_next_open_row(board, col), col, turn)
                         if winning_move(board, turn):
+                            winner = turn
                             counts["wins" if turn == seat else "losses"] += 1
                             break
                         turn = 3 - turn
+                    if tracing:
+                        trace_fn(dict(game_id=f"{seed}:{opponent}:{game_index}:{seat}",
+                                      seed=seed, game_seed=game_seed, game_index=game_index,
+                                      opponent=opponent, candidate_seat=seat, opening_id=opening_id,
+                                      opening_actions=opening, initial_board=initial_board,
+                                      initial_to_play=1 + len(opening) % 2, moves=moves,
+                                      winner=winner, outcome="draws" if not winner else
+                                      "wins" if winner == seat else "losses",
+                                      final_board=board.astype(int).tolist()))
                 results[opponent]["first" if seat == 1 else "second"] = counts
     finally:
         random.setstate(rng_state)
@@ -142,6 +176,10 @@ def main():
     parser.add_argument("--opponent-simulations", type=int, default=128, help="Simulations for opponent model")
     parser.add_argument("--opponent-raw", action="store_true", help="Use raw policy for opponent model")
     parser.add_argument("--output", help="Optional path to save JSON report")
+    parser.add_argument("--trace-output", help="New JSONL file for replayable game traces; never overwrites")
+    parser.add_argument("--trace-games", choices=("losses", "all"), default="losses")
+    parser.add_argument("--trace-opponents", nargs="*", help="Trace only these report opponent names")
+    parser.add_argument("--trace-seat", choices=("both", "first", "second"), default="both")
     args = parser.parse_args()
     if any(d < 1 for d in args.depths):
         parser.error("depths must be positive")
@@ -149,6 +187,9 @@ def main():
         parser.error("games must be positive and opening plies in [0,12]")
     if args.simulations < 1 or args.c_puct <= 0:
         parser.error("simulations and c-puct must be positive")
+    if args.trace_output and (Path(args.trace_output).exists() or
+                             (args.output and Path(args.trace_output).resolve() == Path(args.output).resolve())):
+        parser.error("trace-output must be a new file separate from output")
     device = torch.device("cpu" if args.cpu or not torch.cuda.is_available() else "cuda")
     if device.type == "cpu":
         torch.set_num_threads(1)
@@ -166,7 +207,10 @@ def main():
         else:
             player.warmup()
         net = None
-        base_move_fn = lambda board, my, other: player.get_move(board, my, other, raw=args.raw)
+        base_move_fn = lambda board, my, other: player.get_move(
+            board, my, other, raw=args.raw, diagnostics=bool(args.trace_output))
+        if args.trace_output:
+            player.get_move(np.zeros((6, 7), np.int8), raw=args.raw, diagnostics=True)
         logits, value = player.predict(np.zeros((6, 7), np.int8), 1)
         probabilities = np.exp(logits - logits.max())
         opening_policy = (probabilities / probabilities.sum()).tolist()
@@ -176,6 +220,8 @@ def main():
                       simulations=0 if args.raw else args.simulations, c_puct=args.c_puct,
                       opening_policy=opening_policy, opening_value=value,
                       raw_opening_column=int(np.argmax(logits)))
+        if args.trace_output:
+            report['model_sha256'] = hashlib.sha256(Path(report['model']).read_bytes()).hexdigest()
     elif args.agent == "alphazero":
         from alphazero import AlphaZeroAgent, DEFAULT_MODEL_PATH, Position, load_checkpoint
         net, _ = load_checkpoint(args.model or DEFAULT_MODEL_PATH, device)
@@ -228,6 +274,8 @@ def main():
         extra_opponents[opp_key] = lambda board, my, other: opp_agent.get_move(board, my, other, raw=args.opponent_raw)
         report["opponent_model"] = str(opp_path)
         report["opponent_search"] = asdict(opp_agent.settings)
+        if args.trace_output:
+            report['opponent_sha256'] = hashlib.sha256(opp_path.read_bytes()).hexdigest()
 
     latencies = []
 
@@ -237,8 +285,22 @@ def main():
         latencies.append(time.perf_counter() - start)
         return action
 
-    results = evaluate_network(net, args.games, args.seed, tuple(args.depths), args.raw,
-                               args.opening_plies, move_fn, extra_opponents)
+    with ExitStack() as stack:
+        traces = None
+        if args.trace_output:
+            from benchmark_traces import TraceWriter
+            traces = stack.enter_context(TraceWriter(
+                args.trace_output, dict(report, seed=args.seed, games_per_seat=args.games,
+                                       opening_plies=args.opening_plies), games=args.trace_games,
+                opponents=args.trace_opponents, seat=args.trace_seat))
+        results = evaluate_network(net, args.games, args.seed, tuple(args.depths), args.raw,
+                                   args.opening_plies, move_fn, extra_opponents,
+                                   trace_fn=traces, trace_filter=traces.eligible if traces else None,
+                                   diagnostics_fn=(lambda board, my, other: player.last_result)
+                                   if args.trace_output and args.agent == "equinox" else None)
+        if traces:
+            report["trace"] = dict(path=str(traces.path), games_written=traces.count,
+                                   games=args.trace_games, opponents=args.trace_opponents, seat=args.trace_seat)
     report.update(seed=args.seed, opening_plies=args.opening_plies, results=results)
     if latencies:
         import numpy as np
